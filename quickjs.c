@@ -2594,6 +2594,9 @@ static int js_deterministic_init_host(JSContext *ctx)
     if (ret < 0)
         goto fail;
 
+    if (JS_PreventExtensions(ctx, host_v1) < 0 || JS_PreventExtensions(ctx, host_ns) < 0)
+        goto fail;
+
     JS_FreeValue(ctx, host_ns);
     JS_FreeValue(ctx, host_v1);
 
