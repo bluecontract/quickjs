@@ -2236,11 +2236,17 @@ enum {
     JS_DETERMINISTIC_DISABLED_DATAVIEW = 10,
     JS_DETERMINISTIC_DISABLED_WEBASSEMBLY = 11,
     JS_DETERMINISTIC_DISABLED_ATOMICS = 12,
+    JS_DETERMINISTIC_DISABLED_CONSOLE = 13,
+    JS_DETERMINISTIC_DISABLED_PRINT = 14,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_PRINT:
+        return "print";
+    case JS_DETERMINISTIC_DISABLED_CONSOLE:
+        return "console";
     case JS_DETERMINISTIC_DISABLED_ATOMICS:
         return "Atomics";
     case JS_DETERMINISTIC_DISABLED_WEBASSEMBLY:
@@ -2518,6 +2524,49 @@ static int js_deterministic_disable_atomics(JSContext *ctx)
                                                    JS_DETERMINISTIC_DISABLED_ATOMICS);
 }
 
+static int js_deterministic_disable_console(JSContext *ctx)
+{
+    JSValue console;
+
+    console = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(console))
+        return -1;
+
+    static const char *const methods[] = { "log", "info", "warn", "error", "debug" };
+    for (size_t i = 0; i < countof(methods); i++) {
+        JSValue fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "console", 1,
+                                          JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_CONSOLE);
+        if (JS_IsException(fn)) {
+            JS_FreeValue(ctx, console);
+            return -1;
+        }
+        if (JS_DefinePropertyValueStr(ctx, console, methods[i], JS_DupValue(ctx, fn),
+                                      JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                          JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE) < 0) {
+            JS_FreeValue(ctx, fn);
+            JS_FreeValue(ctx, console);
+            return -1;
+        }
+        JS_FreeValue(ctx, fn);
+    }
+
+    if (JS_DefinePropertyValueStr(ctx, ctx->global_obj, "console", JS_DupValue(ctx, console),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                      JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE) < 0) {
+        JS_FreeValue(ctx, console);
+        return -1;
+    }
+
+    JS_FreeValue(ctx, console);
+    return 0;
+}
+
+static int js_deterministic_disable_print(JSContext *ctx)
+{
+    return js_deterministic_define_disabled_global(ctx, "print", 1,
+                                                   JS_DETERMINISTIC_DISABLED_PRINT);
+}
+
 static int js_deterministic_init_host(JSContext *ctx)
 {
     JSValue host_ns, host_v1;
@@ -2570,6 +2619,8 @@ static int js_deterministic_init_context(JSContext *ctx)
         js_deterministic_disable_promise(ctx) ||
         js_deterministic_disable_typed_arrays(ctx) ||
         js_deterministic_disable_atomics(ctx) ||
+        js_deterministic_disable_console(ctx) ||
+        js_deterministic_disable_print(ctx) ||
         js_deterministic_disable_webassembly(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
