@@ -2230,11 +2230,29 @@ enum {
     JS_DETERMINISTIC_DISABLED_PROMISE = 4,
     JS_DETERMINISTIC_DISABLED_REGEXP = 5,
     JS_DETERMINISTIC_DISABLED_PROXY = 6,
+    JS_DETERMINISTIC_DISABLED_TYPED_ARRAY = 7,
+    JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER = 8,
+    JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER = 9,
+    JS_DETERMINISTIC_DISABLED_DATAVIEW = 10,
+    JS_DETERMINISTIC_DISABLED_WEBASSEMBLY = 11,
+    JS_DETERMINISTIC_DISABLED_ATOMICS = 12,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_ATOMICS:
+        return "Atomics";
+    case JS_DETERMINISTIC_DISABLED_WEBASSEMBLY:
+        return "WebAssembly";
+    case JS_DETERMINISTIC_DISABLED_DATAVIEW:
+        return "DataView";
+    case JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER:
+        return "SharedArrayBuffer";
+    case JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER:
+        return "ArrayBuffer";
+    case JS_DETERMINISTIC_DISABLED_TYPED_ARRAY:
+        return "Typed arrays";
     case JS_DETERMINISTIC_DISABLED_PROXY:
         return "Proxy";
     case JS_DETERMINISTIC_DISABLED_REGEXP:
@@ -2255,7 +2273,30 @@ static JSValue js_deterministic_disabled(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv, int magic)
 {
     const char *name = js_get_disabled_name(magic);
+    if (magic == JS_DETERMINISTIC_DISABLED_TYPED_ARRAY)
+        return JS_ThrowTypeError(ctx, "%s are disabled in deterministic mode", name);
     return JS_ThrowTypeError(ctx, "%s is disabled in deterministic mode", name);
+}
+
+static int js_deterministic_define_disabled_global(JSContext *ctx, const char *name,
+                                                   int length, int magic)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, name, length,
+                              JS_CFUNC_constructor_or_func_magic, magic);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValueStr(ctx, ctx->global_obj, name, JS_DupValue(ctx, fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_FreeValue(ctx, fn);
+    if (ret < 0)
+        return -1;
+
+    return 0;
 }
 
 static JSValue js_deterministic_compile_regexp(JSContext *ctx, JSValueConst pattern,
@@ -2433,6 +2474,50 @@ static int js_deterministic_disable_promise(JSContext *ctx)
     return 0;
 }
 
+static int js_deterministic_disable_typed_arrays(JSContext *ctx)
+{
+    static const struct {
+        const char *name;
+        int length;
+        int magic;
+    } entries[] = {
+        { "ArrayBuffer", 1, JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER },
+        { "SharedArrayBuffer", 1, JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER },
+        { "DataView", 3, JS_DETERMINISTIC_DISABLED_DATAVIEW },
+        { "Uint8Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Uint8ClampedArray", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Int8Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Uint16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Int16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Uint32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Int32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "BigInt64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "BigUint64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Float16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Float32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+        { "Float64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
+    };
+
+    for (size_t i = 0; i < countof(entries); i++) {
+        if (js_deterministic_define_disabled_global(ctx, entries[i].name,
+                                                    entries[i].length, entries[i].magic))
+            return -1;
+    }
+    return 0;
+}
+
+static int js_deterministic_disable_webassembly(JSContext *ctx)
+{
+    return js_deterministic_define_disabled_global(ctx, "WebAssembly", 1,
+                                                   JS_DETERMINISTIC_DISABLED_WEBASSEMBLY);
+}
+
+static int js_deterministic_disable_atomics(JSContext *ctx)
+{
+    return js_deterministic_define_disabled_global(ctx, "Atomics", 3,
+                                                   JS_DETERMINISTIC_DISABLED_ATOMICS);
+}
+
 static int js_deterministic_init_host(JSContext *ctx)
 {
     JSValue host_ns, host_v1;
@@ -2483,6 +2568,9 @@ static int js_deterministic_init_context(JSContext *ctx)
         js_deterministic_disable_proxy(ctx) ||
         js_deterministic_disable_random(ctx) ||
         js_deterministic_disable_promise(ctx) ||
+        js_deterministic_disable_typed_arrays(ctx) ||
+        js_deterministic_disable_atomics(ctx) ||
+        js_deterministic_disable_webassembly(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
     }
