@@ -2226,11 +2226,14 @@ JSContext *JS_NewContext(JSRuntime *rt)
 enum {
     JS_DETERMINISTIC_DISABLED_EVAL = 1,
     JS_DETERMINISTIC_DISABLED_FUNCTION = 2,
+    JS_DETERMINISTIC_DISABLED_RANDOM = 3,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_RANDOM:
+        return "Math.random";
     case JS_DETERMINISTIC_DISABLED_FUNCTION:
         return "Function";
     case JS_DETERMINISTIC_DISABLED_EVAL:
@@ -2290,6 +2293,38 @@ static int js_deterministic_disable_function(JSContext *ctx)
     return 0;
 }
 
+static int js_deterministic_disable_random(JSContext *ctx)
+{
+    JSValue math, fn;
+    int ret;
+
+    math = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_Math);
+    if (JS_IsException(math))
+        return -1;
+    if (!JS_IsObject(math)) {
+        JS_FreeValue(ctx, math);
+        return -1;
+    }
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "random", 0,
+                              JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_RANDOM);
+    if (JS_IsException(fn)) {
+        JS_FreeValue(ctx, math);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, math, "random", JS_DupValue(ctx, fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+
+    JS_FreeValue(ctx, fn);
+    JS_FreeValue(ctx, math);
+    if (ret < 0)
+        return -1;
+
+    return 0;
+}
+
 static int js_deterministic_init_host(JSContext *ctx)
 {
     JSValue host_ns, host_v1;
@@ -2336,9 +2371,11 @@ static int js_deterministic_init_context(JSContext *ctx)
         JS_AddIntrinsicMapSet(ctx) ||
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
+        js_deterministic_disable_random(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
     }
+    ctx->random_state = 1; /* deterministic seed */
     ctx->deterministic_mode = TRUE;
     return 0;
 }
