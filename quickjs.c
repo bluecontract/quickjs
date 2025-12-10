@@ -489,6 +489,8 @@ struct JSContext {
                              const char *input, size_t input_len,
                              const char *filename, int flags, int scope_idx);
     void *user_opaque;
+
+    BOOL deterministic_mode;
 };
 
 typedef union JSFloat64Union {
@@ -2219,6 +2221,158 @@ JSContext *JS_NewContext(JSRuntime *rt)
         return NULL;
     }
     return ctx;
+}
+
+enum {
+    JS_DETERMINISTIC_DISABLED_EVAL = 1,
+    JS_DETERMINISTIC_DISABLED_FUNCTION = 2,
+};
+
+static const char *js_get_disabled_name(int magic)
+{
+    switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_FUNCTION:
+        return "Function";
+    case JS_DETERMINISTIC_DISABLED_EVAL:
+    default:
+        return "eval";
+    }
+}
+
+static JSValue js_deterministic_disabled(JSContext *ctx, JSValueConst this_val,
+                                         int argc, JSValueConst *argv, int magic)
+{
+    const char *name = js_get_disabled_name(magic);
+    return JS_ThrowTypeError(ctx, "%s is disabled in deterministic mode", name);
+}
+
+static int js_deterministic_disable_eval(JSContext *ctx)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "eval", 1,
+                              JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_EVAL);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_eval, JS_DupValue(ctx, fn),
+                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0) {
+        JS_FreeValue(ctx, fn);
+        return -1;
+    }
+
+    JS_FreeValue(ctx, ctx->eval_obj);
+    ctx->eval_obj = JS_UNDEFINED;
+    JS_FreeValue(ctx, fn);
+    return 0;
+}
+
+static int js_deterministic_disable_function(JSContext *ctx)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Function", 1,
+                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_FUNCTION);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Function, JS_DupValue(ctx, fn),
+                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_FreeValue(ctx, fn);
+    if (ret < 0)
+        return -1;
+
+    return 0;
+}
+
+static int js_deterministic_init_host(JSContext *ctx)
+{
+    JSValue host_ns, host_v1;
+    int ret;
+
+    host_ns = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(host_ns))
+        return -1;
+
+    host_v1 = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(host_v1)) {
+        JS_FreeValue(ctx, host_ns);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, host_ns, "v1", JS_DupValue(ctx, host_v1),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0)
+        goto fail;
+
+    ret = JS_DefinePropertyValueStr(ctx, ctx->global_obj, "Host", JS_DupValue(ctx, host_ns),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0)
+        goto fail;
+
+    JS_FreeValue(ctx, host_ns);
+    JS_FreeValue(ctx, host_v1);
+
+    return 0;
+
+fail:
+    JS_FreeValue(ctx, host_ns);
+    JS_FreeValue(ctx, host_v1);
+    return -1;
+}
+
+static int js_deterministic_init_context(JSContext *ctx)
+{
+    if (JS_AddIntrinsicBaseObjects(ctx) ||
+        JS_AddIntrinsicEval(ctx) ||
+        JS_AddIntrinsicJSON(ctx) ||
+        JS_AddIntrinsicMapSet(ctx) ||
+        js_deterministic_disable_eval(ctx) ||
+        js_deterministic_disable_function(ctx) ||
+        js_deterministic_init_host(ctx)) {
+        return -1;
+    }
+    ctx->deterministic_mode = TRUE;
+    return 0;
+}
+
+int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
+{
+    JSRuntime *rt;
+    JSContext *ctx;
+
+    if (!out_rt || !out_ctx)
+        return -1;
+
+    *out_rt = NULL;
+    *out_ctx = NULL;
+
+    rt = JS_NewRuntime();
+    if (!rt)
+        return -1;
+
+    ctx = JS_NewContextRaw(rt);
+    if (!ctx) {
+        JS_FreeRuntime(rt);
+        return -1;
+    }
+
+    if (js_deterministic_init_context(ctx)) {
+        JS_FreeContext(ctx);
+        JS_FreeRuntime(rt);
+        return -1;
+    }
+
+    *out_rt = rt;
+    *out_ctx = ctx;
+    return 0;
 }
 
 void *JS_GetContextOpaque(JSContext *ctx)
@@ -40435,6 +40589,10 @@ static JSValue js_function_proto(JSContext *ctx, JSValueConst this_val,
 static JSValue js_function_constructor(JSContext *ctx, JSValueConst new_target,
                                        int argc, JSValueConst *argv, int magic)
 {
+    if (unlikely(ctx->deterministic_mode)) {
+        return JS_ThrowTypeError(ctx, "Function constructor is disabled in deterministic mode");
+    }
+
     JSFunctionKindEnum func_kind = magic;
     int i, n, ret;
     JSValue s, proto, obj = JS_UNDEFINED;
