@@ -2227,11 +2227,14 @@ enum {
     JS_DETERMINISTIC_DISABLED_EVAL = 1,
     JS_DETERMINISTIC_DISABLED_FUNCTION = 2,
     JS_DETERMINISTIC_DISABLED_RANDOM = 3,
+    JS_DETERMINISTIC_DISABLED_PROMISE = 4,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_PROMISE:
+        return "Promise";
     case JS_DETERMINISTIC_DISABLED_RANDOM:
         return "Math.random";
     case JS_DETERMINISTIC_DISABLED_FUNCTION:
@@ -2325,6 +2328,51 @@ static int js_deterministic_disable_random(JSContext *ctx)
     return 0;
 }
 
+static int js_deterministic_disable_promise(JSContext *ctx)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Promise", 1,
+                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_PROMISE);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Promise, JS_DupValue(ctx, fn),
+                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+
+    /* Ensure async internals see the disabled ctor */
+    JS_FreeValue(ctx, ctx->promise_ctor);
+    ctx->promise_ctor = JS_DupValue(ctx, fn);
+
+    /* Mirror common Promise statics to the same disabled stub */
+    JS_DefinePropertyValueStr(ctx, fn, "resolve", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_DefinePropertyValueStr(ctx, fn, "reject", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_DefinePropertyValueStr(ctx, fn, "all", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_DefinePropertyValueStr(ctx, fn, "race", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_DefinePropertyValueStr(ctx, fn, "any", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_DefinePropertyValueStr(ctx, fn, "allSettled", JS_DupValue(ctx, fn),
+                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+
+    JS_FreeValue(ctx, fn);
+    if (ret < 0)
+        return -1;
+
+    return 0;
+}
+
 static int js_deterministic_init_host(JSContext *ctx)
 {
     JSValue host_ns, host_v1;
@@ -2372,6 +2420,7 @@ static int js_deterministic_init_context(JSContext *ctx)
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
         js_deterministic_disable_random(ctx) ||
+        js_deterministic_disable_promise(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
     }
