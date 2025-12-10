@@ -2228,11 +2228,17 @@ enum {
     JS_DETERMINISTIC_DISABLED_FUNCTION = 2,
     JS_DETERMINISTIC_DISABLED_RANDOM = 3,
     JS_DETERMINISTIC_DISABLED_PROMISE = 4,
+    JS_DETERMINISTIC_DISABLED_REGEXP = 5,
+    JS_DETERMINISTIC_DISABLED_PROXY = 6,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_PROXY:
+        return "Proxy";
+    case JS_DETERMINISTIC_DISABLED_REGEXP:
+        return "RegExp";
     case JS_DETERMINISTIC_DISABLED_PROMISE:
         return "Promise";
     case JS_DETERMINISTIC_DISABLED_RANDOM:
@@ -2250,6 +2256,14 @@ static JSValue js_deterministic_disabled(JSContext *ctx, JSValueConst this_val,
 {
     const char *name = js_get_disabled_name(magic);
     return JS_ThrowTypeError(ctx, "%s is disabled in deterministic mode", name);
+}
+
+static JSValue js_deterministic_compile_regexp(JSContext *ctx, JSValueConst pattern,
+                                               JSValueConst flags)
+{
+    (void)pattern;
+    (void)flags;
+    return JS_ThrowTypeError(ctx, "RegExp is disabled in deterministic mode");
 }
 
 static int js_deterministic_disable_eval(JSContext *ctx)
@@ -2322,6 +2336,52 @@ static int js_deterministic_disable_random(JSContext *ctx)
 
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, math);
+    if (ret < 0)
+        return -1;
+
+    return 0;
+}
+
+static int js_deterministic_disable_regexp(JSContext *ctx)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "RegExp", 2,
+                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_REGEXP);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_RegExp, JS_DupValue(ctx, fn),
+                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0) {
+        JS_FreeValue(ctx, fn);
+        return -1;
+    }
+
+    JS_FreeValue(ctx, ctx->regexp_ctor);
+    ctx->regexp_ctor = JS_DupValue(ctx, fn);
+    ctx->compile_regexp = js_deterministic_compile_regexp;
+
+    JS_FreeValue(ctx, fn);
+    return 0;
+}
+
+static int js_deterministic_disable_proxy(JSContext *ctx)
+{
+    JSValue fn;
+    int ret;
+
+    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Proxy", 2,
+                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_PROXY);
+    if (JS_IsException(fn))
+        return -1;
+
+    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Proxy, JS_DupValue(ctx, fn),
+                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_FreeValue(ctx, fn);
     if (ret < 0)
         return -1;
 
@@ -2419,6 +2479,8 @@ static int js_deterministic_init_context(JSContext *ctx)
         JS_AddIntrinsicMapSet(ctx) ||
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
+        js_deterministic_disable_regexp(ctx) ||
+        js_deterministic_disable_proxy(ctx) ||
         js_deterministic_disable_random(ctx) ||
         js_deterministic_disable_promise(ctx) ||
         js_deterministic_init_host(ctx)) {
