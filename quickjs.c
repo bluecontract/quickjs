@@ -274,6 +274,8 @@ struct JSRuntime {
     BOOL current_exception_is_uncatchable : 8;
     /* true if inside an out of memory error, to avoid recursing */
     BOOL in_out_of_memory : 8;
+    /* true if inside out-of-gas handling to avoid recursion */
+    BOOL in_out_of_gas : 8;
 
     struct JSStackFrame *current_stack_frame;
 
@@ -1394,6 +1396,39 @@ static void js_trigger_gc(JSRuntime *rt, size_t size)
     }
 }
 
+#define JS_GAS_ALLOC_BASE 3
+#define JS_GAS_ALLOC_PER_BYTE_SHIFT 4
+
+static uint64_t js_gas_allocation_cost(size_t size)
+{
+    const uint64_t unit = UINT64_C(1) << JS_GAS_ALLOC_PER_BYTE_SHIFT;
+    uint64_t units;
+
+    if (size == 0) {
+        units = 0;
+    } else if (size > UINT64_MAX - (unit - 1)) {
+        units = UINT64_MAX;
+    } else {
+        units = ((uint64_t)size + (unit - 1)) >> JS_GAS_ALLOC_PER_BYTE_SHIFT;
+    }
+
+    if (units > UINT64_MAX - JS_GAS_ALLOC_BASE)
+        return UINT64_MAX;
+    return JS_GAS_ALLOC_BASE + units;
+}
+
+static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
+{
+    JSRuntime *rt = ctx->rt;
+
+    if (ctx->gas_limit == JS_GAS_UNLIMITED)
+        return 0;
+    if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
+        return 0;
+
+    return JS_UseGas(ctx, js_gas_allocation_cost(size));
+}
+
 static size_t js_malloc_usable_size_unknown(const void *ptr)
 {
     return 0;
@@ -1432,9 +1467,12 @@ void *js_mallocz_rt(JSRuntime *rt, size_t size)
 void *js_malloc(JSContext *ctx, size_t size)
 {
     void *ptr;
+    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+        return NULL;
     ptr = js_malloc_rt(ctx->rt, size);
     if (unlikely(!ptr)) {
-        JS_ThrowOutOfMemory(ctx);
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
     return ptr;
@@ -1444,9 +1482,12 @@ void *js_malloc(JSContext *ctx, size_t size)
 void *js_mallocz(JSContext *ctx, size_t size)
 {
     void *ptr;
+    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+        return NULL;
     ptr = js_mallocz_rt(ctx->rt, size);
     if (unlikely(!ptr)) {
-        JS_ThrowOutOfMemory(ctx);
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
     return ptr;
@@ -1461,9 +1502,12 @@ void js_free(JSContext *ctx, void *ptr)
 void *js_realloc(JSContext *ctx, void *ptr, size_t size)
 {
     void *ret;
+    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+        return NULL;
     ret = js_realloc_rt(ctx->rt, ptr, size);
     if (unlikely(!ret && size != 0)) {
-        JS_ThrowOutOfMemory(ctx);
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
     return ret;
@@ -1473,9 +1517,12 @@ void *js_realloc(JSContext *ctx, void *ptr, size_t size)
 void *js_realloc2(JSContext *ctx, void *ptr, size_t size, size_t *pslack)
 {
     void *ret;
+    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+        return NULL;
     ret = js_realloc_rt(ctx->rt, ptr, size);
     if (unlikely(!ret && size != 0)) {
-        JS_ThrowOutOfMemory(ctx);
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
         return NULL;
     }
     if (pslack) {
@@ -1720,6 +1767,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     JS_UpdateStackTop(rt);
 
     rt->current_exception = JS_UNINITIALIZED;
+    rt->in_out_of_gas = FALSE;
 
     return rt;
  fail:
@@ -1968,6 +2016,11 @@ static JSString *js_alloc_string_rt(JSRuntime *rt, int max_len, int is_wide_char
 static JSString *js_alloc_string(JSContext *ctx, int max_len, int is_wide_char)
 {
     JSString *p;
+    size_t alloc_size = sizeof(JSString) +
+                        (((size_t)max_len << is_wide_char) + 1 - is_wide_char);
+
+    if (js_charge_gas_allocation_ctx(ctx, alloc_size))
+        return NULL;
     p = js_alloc_string_rt(ctx->rt, max_len, is_wide_char);
     if (unlikely(!p)) {
         JS_ThrowOutOfMemory(ctx);
@@ -2805,11 +2858,16 @@ void JS_SetContextOpaque(JSContext *ctx, void *opaque)
 
 static JSValue JS_ThrowOutOfGas(JSContext *ctx)
 {
+    JSRuntime *rt = ctx->rt;
     JSValue obj, name, message, code;
 
+    if (rt->in_out_of_gas)
+        return JS_EXCEPTION;
+
+    rt->in_out_of_gas = TRUE;
     obj = JS_NewError(ctx);
     if (JS_IsException(obj))
-        return JS_EXCEPTION;
+        goto fail;
 
     name = JS_NewString(ctx, "OutOfGas");
     message = JS_NewString(ctx, "out of gas");
@@ -2822,7 +2880,7 @@ static JSValue JS_ThrowOutOfGas(JSContext *ctx)
         if (!JS_IsException(code))
             JS_FreeValue(ctx, code);
         JS_FreeValue(ctx, obj);
-        return JS_EXCEPTION;
+        goto fail;
     }
 
     JS_DefinePropertyValue(ctx, obj, JS_ATOM_name, name,
@@ -2833,6 +2891,11 @@ static JSValue JS_ThrowOutOfGas(JSContext *ctx)
                               JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
     JS_Throw(ctx, obj);
     JS_SetUncatchableException(ctx, TRUE);
+    rt->in_out_of_gas = FALSE;
+    return JS_EXCEPTION;
+
+fail:
+    rt->in_out_of_gas = FALSE;
     return JS_EXCEPTION;
 }
 
