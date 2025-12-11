@@ -383,6 +383,7 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque);
 typedef void JS_MarkFunc(JSRuntime *rt, JSGCObjectHeader *gp);
 void JS_MarkValue(JSRuntime *rt, JSValueConst val, JS_MarkFunc *mark_func);
 void JS_RunGC(JSRuntime *rt);
+int JS_RunGCCheckpoint(JSContext *ctx);
 JS_BOOL JS_IsLiveObject(JSRuntime *rt, JSValueConst obj);
 
 JSContext *JS_NewContext(JSRuntime *rt);

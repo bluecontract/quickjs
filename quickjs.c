@@ -260,6 +260,9 @@ struct JSRuntime {
     struct list_head tmp_obj_list; /* used during GC */
     JSGCPhaseEnum gc_phase : 8;
     size_t malloc_gc_threshold;
+    BOOL deterministic_mode : 8;
+    BOOL det_gc_pending : 8;
+    uint64_t det_gc_alloc_bytes;
     struct list_head weakref_list; /* list of JSWeakRefHeader.link */
 #ifdef DUMP_LEAKS
     struct list_head string_list; /* list of JSString.link */
@@ -1379,6 +1382,9 @@ static JSClassID js_class_id_alloc = JS_CLASS_INIT_COUNT;
 static void js_trigger_gc(JSRuntime *rt, size_t size)
 {
     BOOL force_gc;
+
+    if (rt->deterministic_mode)
+        return;
 #ifdef FORCE_GC_AT_MALLOC
     force_gc = TRUE;
 #else
@@ -1398,6 +1404,7 @@ static void js_trigger_gc(JSRuntime *rt, size_t size)
 
 #define JS_GAS_ALLOC_BASE 3
 #define JS_GAS_ALLOC_PER_BYTE_SHIFT 4
+#define JS_DET_GC_THRESHOLD_BYTES (512 * 1024)
 
 static uint64_t js_gas_allocation_cost(size_t size)
 {
@@ -1425,6 +1432,12 @@ static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
         return 0;
     if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
         return 0;
+
+    if (rt->deterministic_mode) {
+        rt->det_gc_alloc_bytes += size;
+        if (rt->det_gc_alloc_bytes >= JS_DET_GC_THRESHOLD_BYTES)
+            rt->det_gc_pending = TRUE;
+    }
 
     return JS_UseGas(ctx, js_gas_allocation_cost(size));
 }
@@ -2829,6 +2842,11 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
     if (!rt)
         return -1;
 
+    rt->deterministic_mode = TRUE;
+    rt->det_gc_pending = FALSE;
+    rt->det_gc_alloc_bytes = 0;
+    JS_SetGCThreshold(rt, (size_t)-1);
+
     ctx = JS_NewContextRaw(rt);
     if (!ctx) {
         JS_FreeRuntime(rt);
@@ -2932,6 +2950,22 @@ int JS_UseGas(JSContext *ctx, uint64_t amount)
         return -1;
     }
     ctx->gas_remaining -= amount;
+    return 0;
+}
+
+int JS_RunGCCheckpoint(JSContext *ctx)
+{
+    JSRuntime *rt = ctx->rt;
+
+    if (rt->current_exception_is_uncatchable || rt->in_out_of_gas)
+        return 0;
+
+    if (rt->deterministic_mode && !rt->det_gc_pending)
+        return 0;
+
+    JS_RunGC(rt);
+    rt->det_gc_pending = FALSE;
+    rt->det_gc_alloc_bytes = 0;
     return 0;
 }
 
