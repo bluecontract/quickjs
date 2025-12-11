@@ -347,6 +347,9 @@ typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSV
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
 typedef JSValue JSCFunctionData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data);
 
+#define JS_GAS_VERSION_LATEST 1
+#define JS_GAS_UNLIMITED UINT64_C(0xffffffffffffffff)
+
 typedef struct JSMallocState {
     size_t malloc_count;
     size_t malloc_size;
@@ -388,6 +391,11 @@ void JS_FreeContext(JSContext *s);
 JSContext *JS_DupContext(JSContext *ctx);
 void *JS_GetContextOpaque(JSContext *ctx);
 void JS_SetContextOpaque(JSContext *ctx, void *opaque);
+void JS_SetGasLimit(JSContext *ctx, uint64_t gas_limit);
+uint64_t JS_GetGasRemaining(JSContext *ctx);
+uint64_t JS_GetGasLimit(JSContext *ctx);
+uint32_t JS_GetGasVersion(JSContext *ctx);
+int JS_UseGas(JSContext *ctx, uint64_t amount);
 JSRuntime *JS_GetRuntime(JSContext *ctx);
 void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj);
 JSValue JS_GetClassProto(JSContext *ctx, JSClassID class_id);

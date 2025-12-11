@@ -490,6 +490,10 @@ struct JSContext {
                              const char *filename, int flags, int scope_idx);
     void *user_opaque;
 
+    uint64_t gas_limit;
+    uint64_t gas_remaining;
+    uint32_t gas_version;
+
     BOOL deterministic_mode;
 };
 
@@ -1086,6 +1090,23 @@ enum OPCodeEnum {
 #undef FMT
     OP_TEMP_END,
 };
+
+static const uint16_t js_opcode_gas_cost[OP_COUNT] = {
+#define FMT(f)
+#define DEF(id, size, n_pop, n_push, f) [OP_ ## id] = 1,
+#define def(id, size, n_pop, n_push, f)
+#include "quickjs-opcode.h"
+#undef def
+#undef DEF
+#undef FMT
+};
+
+static inline uint16_t js_get_opcode_gas_cost(uint8_t opcode)
+{
+    if (opcode < OP_COUNT)
+        return js_opcode_gas_cost[opcode];
+    return 0;
+}
 
 static int JS_InitAtoms(JSRuntime *rt);
 static JSAtom __JS_NewAtomInit(JSRuntime *rt, const char *str, int len,
@@ -2189,6 +2210,9 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
     ctx->iterator_ctor = JS_NULL;
     ctx->regexp_ctor = JS_NULL;
     ctx->promise_ctor = JS_NULL;
+    ctx->gas_limit = JS_GAS_UNLIMITED;
+    ctx->gas_remaining = JS_GAS_UNLIMITED;
+    ctx->gas_version = JS_GAS_VERSION_LATEST;
     init_list_head(&ctx->loaded_modules);
 
     if (JS_AddIntrinsicBasicObjects(ctx)) {
@@ -2238,11 +2262,20 @@ enum {
     JS_DETERMINISTIC_DISABLED_ATOMICS = 12,
     JS_DETERMINISTIC_DISABLED_CONSOLE = 13,
     JS_DETERMINISTIC_DISABLED_PRINT = 14,
+    JS_DETERMINISTIC_DISABLED_JSON_PARSE = 15,
+    JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY = 16,
+    JS_DETERMINISTIC_DISABLED_ARRAY_SORT = 17,
 };
 
 static const char *js_get_disabled_name(int magic)
 {
     switch (magic) {
+    case JS_DETERMINISTIC_DISABLED_ARRAY_SORT:
+        return "Array.prototype.sort";
+    case JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY:
+        return "JSON.stringify";
+    case JS_DETERMINISTIC_DISABLED_JSON_PARSE:
+        return "JSON.parse";
     case JS_DETERMINISTIC_DISABLED_PRINT:
         return "print";
     case JS_DETERMINISTIC_DISABLED_CONSOLE:
@@ -2567,6 +2600,99 @@ static int js_deterministic_disable_print(JSContext *ctx)
                                                    JS_DETERMINISTIC_DISABLED_PRINT);
 }
 
+static int js_deterministic_disable_json(JSContext *ctx)
+{
+    JSValue json, parse_fn, stringify_fn;
+    int ret;
+
+    json = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_JSON);
+    if (JS_IsException(json))
+        return -1;
+    if (!JS_IsObject(json)) {
+        JS_FreeValue(ctx, json);
+        return -1;
+    }
+
+    parse_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "parse", 2,
+                                    JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_PARSE);
+    if (JS_IsException(parse_fn)) {
+        JS_FreeValue(ctx, json);
+        return -1;
+    }
+    stringify_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "stringify", 3,
+                                        JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY);
+    if (JS_IsException(stringify_fn)) {
+        JS_FreeValue(ctx, parse_fn);
+        JS_FreeValue(ctx, json);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, json, "parse", JS_DupValue(ctx, parse_fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0)
+        goto fail;
+
+    ret = JS_DefinePropertyValueStr(ctx, json, "stringify", JS_DupValue(ctx, stringify_fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    if (ret < 0)
+        goto fail;
+
+    JS_FreeValue(ctx, parse_fn);
+    JS_FreeValue(ctx, stringify_fn);
+    JS_FreeValue(ctx, json);
+    return 0;
+
+fail:
+    JS_FreeValue(ctx, parse_fn);
+    JS_FreeValue(ctx, stringify_fn);
+    JS_FreeValue(ctx, json);
+    return -1;
+}
+
+static int js_deterministic_disable_array_sort(JSContext *ctx)
+{
+    JSValue array_ctor, array_proto, sort_fn;
+    int ret;
+
+    array_ctor = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_Array);
+    if (JS_IsException(array_ctor))
+        return -1;
+    if (!JS_IsObject(array_ctor)) {
+        JS_FreeValue(ctx, array_ctor);
+        return -1;
+    }
+
+    array_proto = JS_GetProperty(ctx, array_ctor, JS_ATOM_prototype);
+    if (JS_IsException(array_proto)) {
+        JS_FreeValue(ctx, array_ctor);
+        return -1;
+    }
+    JS_FreeValue(ctx, array_ctor);
+    if (!JS_IsObject(array_proto)) {
+        JS_FreeValue(ctx, array_proto);
+        return -1;
+    }
+
+    sort_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "sort", 1,
+                                   JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_ARRAY_SORT);
+    if (JS_IsException(sort_fn)) {
+        JS_FreeValue(ctx, array_proto);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, array_proto, "sort", JS_DupValue(ctx, sort_fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+
+    JS_FreeValue(ctx, sort_fn);
+    JS_FreeValue(ctx, array_proto);
+    if (ret < 0)
+        return -1;
+    return 0;
+}
+
 static int js_deterministic_init_host(JSContext *ctx)
 {
     JSValue host_ns, host_v1;
@@ -2624,6 +2750,8 @@ static int js_deterministic_init_context(JSContext *ctx)
         js_deterministic_disable_atomics(ctx) ||
         js_deterministic_disable_console(ctx) ||
         js_deterministic_disable_print(ctx) ||
+        js_deterministic_disable_json(ctx) ||
+        js_deterministic_disable_array_sort(ctx) ||
         js_deterministic_disable_webassembly(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
@@ -2673,6 +2801,75 @@ void *JS_GetContextOpaque(JSContext *ctx)
 void JS_SetContextOpaque(JSContext *ctx, void *opaque)
 {
     ctx->user_opaque = opaque;
+}
+
+static JSValue JS_ThrowOutOfGas(JSContext *ctx)
+{
+    JSValue obj, name, message, code;
+
+    obj = JS_NewError(ctx);
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+
+    name = JS_NewString(ctx, "OutOfGas");
+    message = JS_NewString(ctx, "out of gas");
+    code = JS_NewString(ctx, "OOG");
+    if (JS_IsException(name) || JS_IsException(message) || JS_IsException(code)) {
+        if (!JS_IsException(name))
+            JS_FreeValue(ctx, name);
+        if (!JS_IsException(message))
+            JS_FreeValue(ctx, message);
+        if (!JS_IsException(code))
+            JS_FreeValue(ctx, code);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+
+    JS_DefinePropertyValue(ctx, obj, JS_ATOM_name, name,
+                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValue(ctx, obj, JS_ATOM_message, message,
+                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, obj, "code", code,
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_Throw(ctx, obj);
+    JS_SetUncatchableException(ctx, TRUE);
+    return JS_EXCEPTION;
+}
+
+void JS_SetGasLimit(JSContext *ctx, uint64_t gas_limit)
+{
+    ctx->gas_limit = gas_limit;
+    ctx->gas_remaining = gas_limit;
+}
+
+uint64_t JS_GetGasRemaining(JSContext *ctx)
+{
+    return ctx->gas_remaining;
+}
+
+uint64_t JS_GetGasLimit(JSContext *ctx)
+{
+    return ctx->gas_limit;
+}
+
+uint32_t JS_GetGasVersion(JSContext *ctx)
+{
+    return ctx->gas_version;
+}
+
+int JS_UseGas(JSContext *ctx, uint64_t amount)
+{
+    if (ctx->gas_limit == JS_GAS_UNLIMITED)
+        return 0;
+    if (amount == 0)
+        return 0;
+    if (amount > ctx->gas_remaining) {
+        ctx->gas_remaining = 0;
+        JS_ThrowOutOfGas(ctx);
+        return -1;
+    }
+    ctx->gas_remaining -= amount;
+    return 0;
 }
 
 /* set the new value and free the old value after (freeing the value
@@ -17813,7 +18010,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     size_t alloca_size;
 
 #if !DIRECT_DISPATCH
-#define SWITCH(pc)      switch (opcode = *pc++)
+#define DISPATCH()      switch (opcode)
 #define CASE(op)        case op
 #define DEFAULT         default
 #define BREAK           break
@@ -17828,10 +18025,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
 #include "quickjs-opcode.h"
         [ OP_COUNT ... 255 ] = &&case_default
     };
-#define SWITCH(pc)      goto *dispatch_table[opcode = *pc++];
+#define DISPATCH()      goto *dispatch_table[opcode]
 #define CASE(op)        case_ ## op
 #define DEFAULT         case_default
-#define BREAK           SWITCH(pc)
+#define BREAK           goto dispatch_next
 #endif
 
     if (js_poll_interrupts(caller_ctx))
@@ -17924,8 +18121,16 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
     for(;;) {
         int call_argc;
         JSValue *call_argv;
+        opcode = *pc++;
+        uint16_t gas_cost = js_get_opcode_gas_cost(opcode);
+        if (unlikely(JS_UseGas(ctx, gas_cost) != 0))
+            goto exception;
 
-        SWITCH(pc) {
+    #if !DIRECT_DISPATCH
+        DISPATCH() {
+    #else
+        DISPATCH();
+    #endif
         CASE(OP_push_i32):
             *sp++ = JS_NewInt32(ctx, get_u32(pc));
             pc += 4;
@@ -20505,7 +20710,13 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             JS_ThrowInternalError(ctx, "invalid opcode: pc=%u opcode=0x%02x",
                                   (int)(pc - b->byte_code_buf - 1), opcode);
             goto exception;
+#if !DIRECT_DISPATCH
         }
+#endif
+#if DIRECT_DISPATCH
+    dispatch_next:
+        ;
+#endif
     }
  exception:
     if (is_backtrace_needed(ctx, rt->current_exception)) {
@@ -41925,6 +42136,9 @@ exception:
 #define special_filter   4
 #define special_TA       8
 
+#define JS_GAS_ARRAY_CB_BASE 5
+#define JS_GAS_ARRAY_CB_PER_ELEMENT 2
+
 static JSValue js_typed_array___speciesCreate(JSContext *ctx,
                                               JSValueConst this_val,
                                               int argc, JSValueConst *argv);
@@ -41938,8 +42152,11 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     int64_t len, k, n;
     int present;
 
+    obj = JS_UNDEFINED;
     ret = JS_UNDEFINED;
     val = JS_UNDEFINED;
+    if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
+        goto exception;
     if (special & special_TA) {
         obj = JS_DupValue(ctx, this_val);
         len = js_typed_array_get_length_unsafe(ctx, obj);
@@ -41994,6 +42211,8 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     n = 0;
 
     for(k = 0; k < len; k++) {
+        if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+            goto exception;
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k);
             if (JS_IsException(val))
@@ -42095,8 +42314,11 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
     int64_t len, k, k1;
     int present;
 
+    obj = JS_UNDEFINED;
     acc = JS_UNDEFINED;
     val = JS_UNDEFINED;
+    if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
+        goto exception;
     if (special & special_TA) {
         obj = JS_DupValue(ctx, this_val);
         len = js_typed_array_get_length_unsafe(ctx, obj);
@@ -42117,6 +42339,8 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         acc = JS_DupValue(ctx, argv[1]);
     } else {
         for(;;) {
+            if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+                goto exception;
             if (k >= len) {
                 JS_ThrowTypeError(ctx, "empty array");
                 goto exception;
@@ -42139,6 +42363,8 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
     }
     for (; k < len; k++) {
         k1 = (special & special_reduceRight) ? len - k - 1 : k;
+        if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+            goto exception;
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k1);
             if (JS_IsException(val))
