@@ -234,6 +234,7 @@ typedef enum {
 } JSGCPhaseEnum;
 
 typedef enum OPCodeEnum OPCodeEnum;
+typedef struct JSGasTraceData JSGasTraceData;
 
 struct JSRuntime {
     JSMallocFunctions mf;
@@ -499,6 +500,7 @@ struct JSContext {
     uint64_t gas_remaining;
     uint32_t gas_version;
 
+    JSGasTraceData *gas_trace;
     BOOL deterministic_mode;
 };
 
@@ -1113,6 +1115,77 @@ static inline uint16_t js_get_opcode_gas_cost(uint8_t opcode)
     return 0;
 }
 
+struct JSGasTraceData {
+    BOOL enabled;
+    uint64_t opcode_count_total;
+    uint64_t opcode_gas;
+    uint64_t builtin_array_cb_base_count;
+    uint64_t builtin_array_cb_base_gas;
+    uint64_t builtin_array_cb_per_element_count;
+    uint64_t builtin_array_cb_per_element_gas;
+    uint64_t allocation_count;
+    uint64_t allocation_bytes;
+    uint64_t allocation_gas;
+};
+
+static void js_gas_trace_reset_counts(JSGasTraceData *trace)
+{
+    BOOL enabled = trace->enabled;
+    memset(trace, 0, sizeof(*trace));
+    trace->enabled = enabled;
+}
+
+static JSGasTraceData *js_gas_trace_or_null(JSContext *ctx)
+{
+    if (!ctx || !ctx->gas_trace || !ctx->gas_trace->enabled)
+        return NULL;
+    return ctx->gas_trace;
+}
+
+static JSGasTraceData *js_gas_trace_ensure(JSContext *ctx)
+{
+    if (!ctx->gas_trace) {
+        ctx->gas_trace = js_mallocz_rt(ctx->rt, sizeof(JSGasTraceData));
+    }
+    return ctx->gas_trace;
+}
+
+static void js_gas_trace_record_opcode(JSContext *ctx, uint8_t opcode, uint16_t gas_cost)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    trace->opcode_count_total++;
+    trace->opcode_gas += gas_cost;
+}
+
+static void js_gas_trace_record_array_cb(JSContext *ctx, uint16_t gas_cost, BOOL per_element)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    if (per_element) {
+        trace->builtin_array_cb_per_element_count++;
+        trace->builtin_array_cb_per_element_gas += gas_cost;
+    } else {
+        trace->builtin_array_cb_base_count++;
+        trace->builtin_array_cb_base_gas += gas_cost;
+    }
+}
+
+static void js_gas_trace_record_allocation(JSContext *ctx, size_t size, uint64_t gas_cost)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    trace->allocation_count++;
+    trace->allocation_bytes += size;
+    trace->allocation_gas += gas_cost;
+}
+
 static int JS_InitAtoms(JSRuntime *rt);
 static JSAtom __JS_NewAtomInit(JSRuntime *rt, const char *str, int len,
                                int atom_type);
@@ -1427,9 +1500,8 @@ static uint64_t js_gas_allocation_cost(size_t size)
 static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
 {
     JSRuntime *rt = ctx->rt;
+    uint64_t gas_cost;
 
-    if (ctx->gas_limit == JS_GAS_UNLIMITED)
-        return 0;
     if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
         return 0;
 
@@ -1439,7 +1511,12 @@ static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
             rt->det_gc_pending = TRUE;
     }
 
-    return JS_UseGas(ctx, js_gas_allocation_cost(size));
+    gas_cost = js_gas_allocation_cost(size);
+    if (JS_UseGas(ctx, gas_cost))
+        return -1;
+
+    js_gas_trace_record_allocation(ctx, size, gas_cost);
+    return 0;
 }
 
 static size_t js_malloc_usable_size_unknown(const void *ptr)
@@ -2938,6 +3015,53 @@ uint32_t JS_GetGasVersion(JSContext *ctx)
     return ctx->gas_version;
 }
 
+int JS_EnableGasTrace(JSContext *ctx, int enabled)
+{
+    JSGasTraceData *trace;
+
+    if (!ctx)
+        return -1;
+
+    trace = js_gas_trace_ensure(ctx);
+    if (!trace)
+        return -1;
+
+    memset(trace, 0, sizeof(*trace));
+    trace->enabled = enabled ? TRUE : FALSE;
+    return 0;
+}
+
+int JS_ResetGasTrace(JSContext *ctx)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+
+    if (!trace)
+        return -1;
+
+    js_gas_trace_reset_counts(trace);
+    return 0;
+}
+
+int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+
+    if (!trace || !out_trace)
+        return -1;
+
+    out_trace->opcode_count = trace->opcode_count_total;
+    out_trace->opcode_gas = trace->opcode_gas;
+    out_trace->builtin_array_cb_base_count = trace->builtin_array_cb_base_count;
+    out_trace->builtin_array_cb_base_gas = trace->builtin_array_cb_base_gas;
+    out_trace->builtin_array_cb_per_element_count = trace->builtin_array_cb_per_element_count;
+    out_trace->builtin_array_cb_per_element_gas = trace->builtin_array_cb_per_element_gas;
+    out_trace->allocation_count = trace->allocation_count;
+    out_trace->allocation_bytes = trace->allocation_bytes;
+    out_trace->allocation_gas = trace->allocation_gas;
+
+    return 0;
+}
+
 int JS_UseGas(JSContext *ctx, uint64_t amount)
 {
     if (ctx->gas_limit == JS_GAS_UNLIMITED)
@@ -3140,6 +3264,8 @@ void JS_FreeContext(JSContext *ctx)
 
     list_del(&ctx->link);
     remove_gc_object(&ctx->header);
+    if (ctx->gas_trace)
+        js_free_rt(ctx->rt, ctx->gas_trace);
     js_free_rt(ctx->rt, ctx);
 }
 
@@ -18222,6 +18348,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         uint16_t gas_cost = js_get_opcode_gas_cost(opcode);
         if (unlikely(JS_UseGas(ctx, gas_cost) != 0))
             goto exception;
+        js_gas_trace_record_opcode(ctx, opcode, gas_cost);
 
     #if !DIRECT_DISPATCH
         DISPATCH() {
@@ -42254,6 +42381,7 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     val = JS_UNDEFINED;
     if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
         goto exception;
+    js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_BASE, FALSE);
     if (special & special_TA) {
         obj = JS_DupValue(ctx, this_val);
         len = js_typed_array_get_length_unsafe(ctx, obj);
@@ -42310,6 +42438,7 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     for(k = 0; k < len; k++) {
         if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
             goto exception;
+        js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k);
             if (JS_IsException(val))
@@ -42416,6 +42545,7 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
     val = JS_UNDEFINED;
     if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
         goto exception;
+    js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_BASE, FALSE);
     if (special & special_TA) {
         obj = JS_DupValue(ctx, this_val);
         len = js_typed_array_get_length_unsafe(ctx, obj);
@@ -42438,6 +42568,7 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         for(;;) {
             if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
                 goto exception;
+            js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
             if (k >= len) {
                 JS_ThrowTypeError(ctx, "empty array");
                 goto exception;
@@ -42462,6 +42593,7 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         k1 = (special & special_reduceRight) ? len - k - 1 : k;
         if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
             goto exception;
+        js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
         if (special & special_TA) {
             val = JS_GetPropertyInt64(ctx, obj, k1);
             if (JS_IsException(val))
