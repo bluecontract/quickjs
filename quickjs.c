@@ -3026,7 +3026,7 @@ int JS_EnableGasTrace(JSContext *ctx, int enabled)
     if (!trace)
         return -1;
 
-    memset(trace, 0, sizeof(*trace));
+    js_gas_trace_reset_counts(trace);
     trace->enabled = enabled ? TRUE : FALSE;
     return 0;
 }
