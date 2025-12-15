@@ -411,6 +411,26 @@ int JS_EnableGasTrace(JSContext *ctx, int enabled);
 int JS_ResetGasTrace(JSContext *ctx);
 int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace);
 int JS_UseGas(JSContext *ctx, uint64_t amount);
+
+typedef struct JSDvLimits {
+    uint32_t max_depth;
+    uint32_t max_encoded_bytes;
+    uint32_t max_string_bytes;
+    uint32_t max_array_length;
+    uint32_t max_map_length;
+} JSDvLimits;
+
+typedef struct JSDvBuffer {
+    uint8_t *data;
+    size_t length;
+} JSDvBuffer;
+
+extern const JSDvLimits JS_DV_LIMIT_DEFAULTS;
+
+int JS_EncodeDV(JSContext *ctx, JSValueConst value, const JSDvLimits *limits, JSDvBuffer *out_buffer);
+JSValue JS_DecodeDV(JSContext *ctx, const uint8_t *data, size_t length, const JSDvLimits *limits);
+void JS_FreeDVBuffer(JSContext *ctx, JSDvBuffer *buffer);
+
 JSRuntime *JS_GetRuntime(JSContext *ctx);
 void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj);
 JSValue JS_GetClassProto(JSContext *ctx, JSClassID class_id);
