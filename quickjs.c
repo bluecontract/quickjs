@@ -44,6 +44,7 @@
 #include "list.h"
 #include "quickjs-internal.h"
 #include "quickjs.h"
+#include "quickjs-host.h"
 #include "libregexp.h"
 #include "libunicode.h"
 #include "dtoa.h"
@@ -3248,7 +3249,7 @@ int JS_HostCall(JSContext *ctx,
         return -1;
 
     if (resp_len == JS_HOST_CALL_TRANSPORT_ERROR || resp_len > resp_capacity) {
-        JS_ThrowTypeError(ctx, "host_call transport failed");
+        JS_ThrowHostTransportError(ctx);
         return -1;
     }
 
