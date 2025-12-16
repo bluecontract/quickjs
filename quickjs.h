@@ -424,6 +424,31 @@ int JS_ResetGasTrace(JSContext *ctx);
 int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace);
 int JS_UseGas(JSContext *ctx, uint64_t amount);
 
+#define JS_HOST_CALL_TRANSPORT_ERROR UINT32_C(0xffffffff)
+
+typedef struct JSHostCallResult {
+    uint8_t *data;
+    uint32_t length;
+} JSHostCallResult;
+/* data points to an internal scratch buffer owned by the context; valid until the next JS_HostCall or context free */
+
+typedef uint32_t JSHostCallFunc(JSContext *ctx,
+                                uint32_t fn_id,
+                                const uint8_t *req_ptr,
+                                uint32_t req_len,
+                                uint8_t *resp_ptr,
+                                uint32_t resp_capacity,
+                                void *opaque);
+
+int JS_SetHostCallDispatcher(JSRuntime *rt, JSHostCallFunc *func, void *opaque);
+int JS_HostCall(JSContext *ctx,
+                uint32_t fn_id,
+                const uint8_t *req_bytes,
+                size_t req_len,
+                uint32_t max_request_bytes,
+                uint32_t max_response_bytes,
+                JSHostCallResult *out_result);
+
 typedef struct JSDvLimits {
     uint32_t max_depth;
     uint32_t max_encoded_bytes;

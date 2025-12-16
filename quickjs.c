@@ -281,6 +281,8 @@ struct JSRuntime {
     BOOL in_out_of_memory : 8;
     /* true if inside out-of-gas handling to avoid recursion */
     BOOL in_out_of_gas : 8;
+    /* true if inside a host_call to prevent reentrancy */
+    BOOL in_host_call : 8;
 
     struct JSStackFrame *current_stack_frame;
 
@@ -289,6 +291,8 @@ struct JSRuntime {
 
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
+    JSHostCallFunc *host_call_func;
+    void *host_call_opaque;
 
     struct list_head job_list; /* list of JSJobEntry.link */
 
@@ -507,6 +511,9 @@ struct JSContext {
     char abi_manifest_hash_hex[65];
     uint8_t *deterministic_context_blob;
     size_t deterministic_context_blob_size;
+
+    uint8_t *host_call_resp_buf;
+    uint32_t host_call_resp_capacity;
 
     JSGasTraceData *gas_trace;
     BOOL deterministic_mode;
@@ -1883,6 +1890,16 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
     rt->user_opaque = opaque;
 }
 
+int JS_SetHostCallDispatcher(JSRuntime *rt, JSHostCallFunc *func, void *opaque)
+{
+    if (!rt)
+        return -1;
+
+    rt->host_call_func = func;
+    rt->host_call_opaque = opaque;
+    return 0;
+}
+
 /* default memory allocation functions with memory limitation */
 static size_t js_def_malloc_usable_size(const void *ptr)
 {
@@ -2912,6 +2929,25 @@ static int js_deterministic_init_context(JSContext *ctx)
     return 0;
 }
 
+#ifdef __EMSCRIPTEN__
+__attribute__((import_module("host"), import_name("host_call")))
+uint32_t js_wasm_import_host_call(uint32_t fn_id, uint32_t req_ptr, uint32_t req_len,
+                                  uint32_t resp_ptr, uint32_t resp_capacity);
+
+static uint32_t js_wasm_host_call(JSContext *ctx, uint32_t fn_id, const uint8_t *req_ptr,
+                                  uint32_t req_len, uint8_t *resp_ptr,
+                                  uint32_t resp_capacity, void *opaque)
+{
+    (void)ctx;
+    (void)opaque;
+    return js_wasm_import_host_call(fn_id,
+                                    (uint32_t)(uintptr_t)req_ptr,
+                                    req_len,
+                                    (uint32_t)(uintptr_t)resp_ptr,
+                                    resp_capacity);
+}
+#endif
+
 int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
 {
     JSRuntime *rt;
@@ -2930,6 +2966,13 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
     rt->deterministic_mode = TRUE;
     rt->det_gc_pending = FALSE;
     rt->det_gc_alloc_bytes = 0;
+#ifdef __EMSCRIPTEN__
+    rt->host_call_func = js_wasm_host_call;
+#else
+    rt->host_call_func = NULL;
+#endif
+    rt->host_call_opaque = NULL;
+    rt->in_host_call = FALSE;
     JS_SetGCThreshold(rt, (size_t)-1);
 
     ctx = JS_NewContextRaw(rt);
@@ -3091,6 +3134,126 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
     ctx->deterministic_context_blob_size = context_copy ? options->context_blob_size : 0;
     JS_SetGasLimit(ctx, options->gas_limit);
 
+    return 0;
+}
+
+static int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity)
+{
+    uint8_t *new_buf;
+
+    if (ctx->host_call_resp_capacity >= capacity)
+        return 0;
+
+    new_buf = js_realloc_rt(ctx->rt, ctx->host_call_resp_buf, capacity);
+    if (!new_buf) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+
+    ctx->host_call_resp_buf = new_buf;
+    ctx->host_call_resp_capacity = capacity;
+    return 0;
+}
+
+int JS_HostCall(JSContext *ctx,
+                uint32_t fn_id,
+                const uint8_t *req_bytes,
+                size_t req_len,
+                uint32_t max_request_bytes,
+                uint32_t max_response_bytes,
+                JSHostCallResult *out_result)
+{
+    JSRuntime *rt;
+    uint32_t resp_len, resp_capacity, req_len32;
+    uint32_t dv_limit;
+    const uint8_t *req_ptr;
+
+    if (!ctx || !out_result)
+        return -1;
+
+    out_result->data = NULL;
+    out_result->length = 0;
+
+    rt = ctx->rt;
+    dv_limit = JS_DV_LIMIT_DEFAULTS.max_encoded_bytes;
+
+    if (!rt->host_call_func) {
+        JS_ThrowTypeError(ctx, "host_call dispatcher is not configured");
+        return -1;
+    }
+
+    if (fn_id == 0) {
+        JS_ThrowTypeError(ctx, "host_call fn_id must be >= 1");
+        return -1;
+    }
+
+    if (max_request_bytes == 0) {
+        JS_ThrowTypeError(ctx, "host_call max_request_bytes must be > 0");
+        return -1;
+    }
+
+    if (max_request_bytes > dv_limit) {
+        JS_ThrowTypeError(ctx, "host_call max_request_bytes exceeds DV limit");
+        return -1;
+    }
+
+    if (max_response_bytes == 0) {
+        JS_ThrowTypeError(ctx, "host_call max_response_bytes must be > 0");
+        return -1;
+    }
+
+    if (max_response_bytes > dv_limit) {
+        JS_ThrowTypeError(ctx, "host_call max_response_bytes exceeds DV limit");
+        return -1;
+    }
+
+    if (req_len > (size_t)max_request_bytes) {
+        JS_ThrowTypeError(ctx, "host_call request exceeds max_request_bytes");
+        return -1;
+    }
+
+    if (req_len > (size_t)dv_limit) {
+        JS_ThrowTypeError(ctx, "host_call request exceeds DV limit");
+        return -1;
+    }
+
+    if (req_len > UINT32_MAX) {
+        JS_ThrowTypeError(ctx, "host_call request length overflow");
+        return -1;
+    }
+
+    if (req_len > 0 && !req_bytes) {
+        JS_ThrowTypeError(ctx, "host_call request pointer is null");
+        return -1;
+    }
+
+    if (rt->in_host_call) {
+        JS_ThrowTypeError(ctx, "host_call is already in progress");
+        return -1;
+    }
+
+    resp_capacity = max_response_bytes;
+    if (js_reserve_host_response_buffer(ctx, resp_capacity))
+        return -1;
+
+    rt->in_host_call = TRUE;
+    req_len32 = (uint32_t)req_len;
+    req_ptr = req_bytes ? req_bytes : NULL;
+    resp_len = rt->host_call_func(ctx, fn_id, req_ptr, req_len32,
+                                  ctx->host_call_resp_buf, resp_capacity,
+                                  rt->host_call_opaque);
+    rt->in_host_call = FALSE;
+
+    if (JS_HasException(ctx))
+        return -1;
+
+    if (resp_len == JS_HOST_CALL_TRANSPORT_ERROR || resp_len > resp_capacity) {
+        JS_ThrowTypeError(ctx, "host_call transport failed");
+        return -1;
+    }
+
+    out_result->data = ctx->host_call_resp_buf;
+    out_result->length = resp_len;
     return 0;
 }
 
@@ -3419,6 +3582,8 @@ void JS_FreeContext(JSContext *ctx)
         js_free_rt(ctx->rt, ctx->abi_manifest_bytes);
     if (ctx->deterministic_context_blob)
         js_free_rt(ctx->rt, ctx->deterministic_context_blob);
+    if (ctx->host_call_resp_buf)
+        js_free_rt(ctx->rt, ctx->host_call_resp_buf);
 
     list_del(&ctx->link);
     remove_gc_object(&ctx->header);
