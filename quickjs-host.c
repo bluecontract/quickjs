@@ -1818,3 +1818,608 @@ done:
     }
     return ret;
 }
+
+/* Ergonomic globals (T-041) */
+
+static int js_freeze_value(JSContext *ctx, JSValueConst val)
+{
+    JSPropertyEnum *props = NULL;
+    uint32_t props_len = 0;
+    int ret = -1;
+
+    if (!JS_IsObject(val))
+        return 0;
+
+    if (JS_GetOwnPropertyNames(ctx, &props, &props_len, val,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        return -1;
+
+    for (uint32_t i = 0; i < props_len; i++) {
+        JSAtom atom = props[i].atom;
+        JSValue prop_val = JS_GetProperty(ctx, val, atom);
+        int flags;
+
+        if (JS_IsException(prop_val))
+            goto done;
+
+        if (js_freeze_value(ctx, prop_val)) {
+            JS_FreeValue(ctx, prop_val);
+            goto done;
+        }
+
+        flags = JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE | JS_PROP_HAS_ENUMERABLE;
+        if (props[i].is_enumerable)
+            flags |= JS_PROP_ENUMERABLE;
+
+        if (JS_DefinePropertyValue(ctx, val, atom, JS_DupValue(ctx, prop_val), flags) < 0) {
+            JS_FreeValue(ctx, prop_val);
+            goto done;
+        }
+
+        JS_FreeValue(ctx, prop_val);
+    }
+
+    if (JS_IsArray(ctx, val)) {
+        JSAtom length_atom = JS_NewAtom(ctx, "length");
+        JSValue length_val = JS_UNDEFINED;
+
+        if (length_atom == JS_ATOM_NULL)
+            goto done;
+
+        length_val = JS_GetProperty(ctx, val, length_atom);
+        if (JS_IsException(length_val)) {
+            JS_FreeAtom(ctx, length_atom);
+            goto done;
+        }
+
+        if (JS_DefinePropertyValue(ctx,
+                                   val,
+                                   length_atom,
+                                   JS_DupValue(ctx, length_val),
+                                   JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE |
+                                       JS_PROP_HAS_ENUMERABLE) < 0) {
+            JS_FreeAtom(ctx, length_atom);
+            JS_FreeValue(ctx, length_val);
+            goto done;
+        }
+
+        JS_FreeAtom(ctx, length_atom);
+        JS_FreeValue(ctx, length_val);
+    }
+
+    if (JS_PreventExtensions(ctx, val) < 0)
+        goto done;
+
+    ret = 0;
+
+done:
+    if (props)
+        JS_FreePropertyEnum(ctx, props, props_len);
+    return ret;
+}
+
+static int js_canon_clone_and_freeze(JSContext *ctx, JSValueConst input, JSValue *out)
+{
+    JSDvBuffer buf = {0};
+    JSDvLimits limits = JS_DV_LIMIT_DEFAULTS;
+    JSValue decoded = JS_UNDEFINED;
+
+    if (!out)
+        return -1;
+
+    if (JS_RunGCCheckpoint(ctx))
+        return -1;
+
+    if (JS_EncodeDV(ctx, input, &limits, &buf))
+        return -1;
+
+    decoded = JS_DecodeDV(ctx, buf.data, buf.length, &limits);
+    JS_FreeDVBuffer(ctx, &buf);
+    if (JS_IsException(decoded))
+        return -1;
+
+    if (js_freeze_value(ctx, decoded)) {
+        JS_FreeValue(ctx, decoded);
+        return -1;
+    }
+
+    *out = decoded;
+    return 0;
+}
+
+static int js_context_copy_and_freeze(JSContext *ctx,
+                                      JSValueConst source,
+                                      JSAtom atom,
+                                      JSValue *out)
+{
+    JSValue tmp = JS_UNDEFINED;
+    JSValue dup = JS_UNDEFINED;
+
+    if (!out)
+        return -1;
+
+    tmp = JS_GetProperty(ctx, source, atom);
+    if (JS_IsException(tmp))
+        return -1;
+
+    if (!JS_IsUndefined(tmp)) {
+        dup = JS_DupValue(ctx, tmp);
+        if (js_freeze_value(ctx, dup)) {
+            JS_FreeValue(ctx, dup);
+            JS_FreeValue(ctx, tmp);
+            return -1;
+        }
+        *out = dup;
+    }
+
+    JS_FreeValue(ctx, tmp);
+    return 0;
+}
+
+static int js_decode_context_blob(JSContext *ctx,
+                                  const uint8_t *context_blob,
+                                  size_t context_blob_size,
+                                  JSValue *out_event,
+                                  JSValue *out_event_canonical,
+                                  JSValue *out_steps)
+{
+    JSValue decoded = JS_UNDEFINED;
+    JSAtom event_atom = JS_ATOM_NULL;
+    JSAtom event_canonical_atom = JS_ATOM_NULL;
+    JSAtom steps_atom = JS_ATOM_NULL;
+    int ret = -1;
+
+    if (!out_event || !out_event_canonical || !out_steps)
+        return -1;
+
+    *out_event = JS_NULL;
+    *out_event_canonical = JS_NULL;
+    *out_steps = JS_NULL;
+
+    if (!context_blob || context_blob_size == 0)
+        return 0;
+
+    decoded = JS_DecodeDV(ctx, context_blob, context_blob_size, &JS_DV_LIMIT_DEFAULTS);
+    if (JS_IsException(decoded))
+        return -1;
+
+    if (!JS_IsObject(decoded) || JS_IsArray(ctx, decoded)) {
+        JS_FreeValue(ctx, decoded);
+        JS_ThrowTypeError(ctx, "context blob must decode to an object");
+        return -1;
+    }
+
+    event_atom = JS_NewAtom(ctx, "event");
+    event_canonical_atom = JS_NewAtom(ctx, "eventCanonical");
+    steps_atom = JS_NewAtom(ctx, "steps");
+    if (event_atom == JS_ATOM_NULL || event_canonical_atom == JS_ATOM_NULL || steps_atom == JS_ATOM_NULL)
+        goto done;
+
+    if (js_context_copy_and_freeze(ctx, decoded, event_atom, out_event))
+        goto done;
+    if (js_context_copy_and_freeze(ctx, decoded, event_canonical_atom, out_event_canonical))
+        goto done;
+    if (js_context_copy_and_freeze(ctx, decoded, steps_atom, out_steps))
+        goto done;
+
+    ret = 0;
+
+done:
+    if (event_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, event_atom);
+    if (event_canonical_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, event_canonical_atom);
+    if (steps_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, steps_atom);
+    if (!JS_IsUndefined(decoded))
+        JS_FreeValue(ctx, decoded);
+    return ret;
+}
+
+static JSValue js_document_wrapper(JSContext *ctx,
+                                   JSValueConst this_val,
+                                   int argc,
+                                   JSValueConst *argv,
+                                   int magic,
+                                   JSValue *func_data)
+{
+    (void)this_val;
+    (void)magic;
+
+    if (!func_data || !JS_IsFunction(ctx, func_data[0])) {
+        JS_ThrowTypeError(ctx, "Host.v1.document binding is missing");
+        return JS_EXCEPTION;
+    }
+
+    return JS_Call(ctx, func_data[0], JS_UNDEFINED, argc, argv);
+}
+
+static JSValue js_canon_unwrap(JSContext *ctx,
+                               JSValueConst this_val,
+                               int argc,
+                               JSValueConst *argv)
+{
+    JSValue clone = JS_UNDEFINED;
+
+    (void)this_val;
+
+    if (argc != 1) {
+        JS_ThrowTypeError(ctx, "canon.unwrap expects 1 argument");
+        return JS_EXCEPTION;
+    }
+
+    if (js_canon_clone_and_freeze(ctx, argv[0], &clone))
+        return JS_EXCEPTION;
+
+    return clone;
+}
+
+static JSValue js_canon_at(JSContext *ctx,
+                           JSValueConst this_val,
+                           int argc,
+                           JSValueConst *argv)
+{
+    JSValue canonical = JS_UNDEFINED;
+    JSValue current = JS_UNDEFINED;
+    JSValue ret = JS_UNDEFINED;
+    uint32_t path_len = 0;
+    BOOL missing = FALSE;
+
+    (void)this_val;
+
+    if (argc < 2) {
+        JS_ThrowTypeError(ctx, "canon.at expects a value and a path array");
+        return JS_EXCEPTION;
+    }
+
+    if (!JS_IsArray(ctx, argv[1])) {
+        JS_ThrowTypeError(ctx, "canon.at path must be an array");
+        return JS_EXCEPTION;
+    }
+
+    if (js_canon_clone_and_freeze(ctx, argv[0], &canonical))
+        return JS_EXCEPTION;
+
+    {
+        JSValue len_val = JS_GetPropertyStr(ctx, argv[1], "length");
+        if (JS_IsException(len_val)) {
+            JS_FreeValue(ctx, canonical);
+            return JS_EXCEPTION;
+        }
+        if (JS_ToUint32(ctx, &path_len, len_val)) {
+            JS_FreeValue(ctx, len_val);
+            JS_FreeValue(ctx, canonical);
+            return JS_EXCEPTION;
+        }
+        JS_FreeValue(ctx, len_val);
+    }
+
+    current = JS_DupValue(ctx, canonical);
+
+    for (uint32_t i = 0; i < path_len; i++) {
+        JSValue segment = JS_GetPropertyUint32(ctx, argv[1], i);
+
+        if (JS_IsException(segment)) {
+            JS_FreeValue(ctx, current);
+            JS_FreeValue(ctx, canonical);
+            return JS_EXCEPTION;
+        }
+
+        if (!JS_IsObject(current)) {
+            JS_FreeValue(ctx, segment);
+            missing = TRUE;
+            break;
+        }
+
+        if (JS_IsString(segment)) {
+            size_t utf8_len = 0;
+            const char *prop = JS_ToCStringLen2(ctx, &utf8_len, segment, 0);
+            JSValue next = JS_UNDEFINED;
+
+            if (!prop) {
+                JS_FreeValue(ctx, segment);
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                return JS_EXCEPTION;
+            }
+
+            if (utf8_len > JS_DV_LIMIT_DEFAULTS.max_string_bytes) {
+                JS_FreeCString(ctx, prop);
+                JS_FreeValue(ctx, segment);
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                JS_ThrowTypeError(ctx, "canon.at path segment exceeds string limit");
+                return JS_EXCEPTION;
+            }
+
+            next = JS_GetPropertyStr(ctx, current, prop);
+            JS_FreeCString(ctx, prop);
+            JS_FreeValue(ctx, segment);
+
+            if (JS_IsException(next)) {
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                return JS_EXCEPTION;
+            }
+
+            if (JS_IsUndefined(next)) {
+                JS_FreeValue(ctx, next);
+                missing = TRUE;
+                break;
+            }
+
+            JS_FreeValue(ctx, current);
+            current = next;
+        } else {
+            BOOL is_number = JS_IsNumber(segment);
+            BOOL is_bigint = JS_IsBigInt(ctx, segment);
+            double idx_d = 0;
+            int64_t index = 0;
+            JSValue next = JS_UNDEFINED;
+
+            if (!is_number && !is_bigint) {
+                JS_FreeValue(ctx, segment);
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
+                return JS_EXCEPTION;
+            }
+
+            if (is_number) {
+                if (JS_ToFloat64(ctx, &idx_d, segment)) {
+                    JS_FreeValue(ctx, segment);
+                    JS_FreeValue(ctx, current);
+                    JS_FreeValue(ctx, canonical);
+                    return JS_EXCEPTION;
+                }
+
+                if (!isfinite(idx_d) || floor(idx_d) != idx_d || (idx_d == 0.0 && signbit(idx_d))) {
+                    JS_FreeValue(ctx, segment);
+                    JS_FreeValue(ctx, current);
+                    JS_FreeValue(ctx, canonical);
+                    JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
+                    return JS_EXCEPTION;
+                }
+
+                index = (int64_t)idx_d;
+            } else {
+                if (JS_ToInt64Ext(ctx, &index, segment)) {
+                    JS_FreeValue(ctx, segment);
+                    JS_FreeValue(ctx, current);
+                    JS_FreeValue(ctx, canonical);
+                    JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
+                    return JS_EXCEPTION;
+                }
+            }
+
+            JS_FreeValue(ctx, segment);
+
+            if (index < 0 || (uint64_t)index >= JS_DV_LIMIT_DEFAULTS.max_array_length) {
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                JS_ThrowTypeError(ctx, "canon.at path index is out of range");
+                return JS_EXCEPTION;
+            }
+
+            if (!JS_IsArray(ctx, current)) {
+                missing = TRUE;
+                break;
+            }
+
+            next = JS_GetPropertyUint32(ctx, current, (uint32_t)index);
+            if (JS_IsException(next)) {
+                JS_FreeValue(ctx, current);
+                JS_FreeValue(ctx, canonical);
+                return JS_EXCEPTION;
+            }
+
+            if (JS_IsUndefined(next)) {
+                JS_FreeValue(ctx, next);
+                missing = TRUE;
+                break;
+            }
+
+            JS_FreeValue(ctx, current);
+            current = next;
+        }
+    }
+
+    if (missing) {
+        JS_FreeValue(ctx, current);
+        current = JS_UNDEFINED;
+        ret = JS_UNDEFINED;
+    } else {
+        ret = current;
+        current = JS_UNDEFINED;
+    }
+
+    JS_FreeValue(ctx, canonical);
+    if (!JS_IsUndefined(current))
+        JS_FreeValue(ctx, current);
+    return ret;
+}
+
+int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t context_blob_size)
+{
+    JSValue global = JS_UNDEFINED;
+    JSValue host = JS_UNDEFINED;
+    JSValue host_v1 = JS_UNDEFINED;
+    JSValue document_ns = JS_UNDEFINED;
+    JSValue document_get = JS_UNDEFINED;
+    JSValue document_get_canonical = JS_UNDEFINED;
+    JSValue document_fn = JS_UNDEFINED;
+    JSValue document_canonical_fn = JS_UNDEFINED;
+    JSValue canon_obj = JS_UNDEFINED;
+    JSValue canon_unwrap_fn = JS_UNDEFINED;
+    JSValue canon_at_fn = JS_UNDEFINED;
+    JSValue event_val = JS_NULL;
+    JSValue event_canonical_val = JS_NULL;
+    JSValue steps_val = JS_NULL;
+    JSValueConst doc_funcs[1];
+    int ret = -1;
+
+    if (!ctx)
+        return -1;
+
+    if (!js_host_find_manifest(ctx)) {
+        JS_ThrowTypeError(ctx, "abi manifest must be initialized before installing ergonomic globals");
+        return -1;
+    }
+
+    if (js_decode_context_blob(ctx, context_blob, context_blob_size, &event_val, &event_canonical_val, &steps_val))
+        goto done;
+
+    global = JS_GetGlobalObject(ctx);
+    if (JS_IsException(global))
+        goto done;
+
+    host = JS_GetPropertyStr(ctx, global, "Host");
+    if (JS_IsException(host))
+        goto done;
+
+    host_v1 = JS_GetPropertyStr(ctx, host, "v1");
+    if (JS_IsException(host_v1))
+        goto done;
+
+    document_ns = JS_GetPropertyStr(ctx, host_v1, "document");
+    if (JS_IsException(document_ns))
+        goto done;
+
+    document_get = JS_GetPropertyStr(ctx, document_ns, "get");
+    if (JS_IsException(document_get))
+        goto done;
+
+    document_get_canonical = JS_GetPropertyStr(ctx, document_ns, "getCanonical");
+    if (JS_IsException(document_get_canonical))
+        goto done;
+
+    if (!JS_IsFunction(ctx, document_get) || !JS_IsFunction(ctx, document_get_canonical)) {
+        JS_ThrowTypeError(ctx, "Host.v1.document bindings are missing");
+        goto done;
+    }
+
+    doc_funcs[0] = JS_DupValue(ctx, document_get);
+    document_fn = JS_NewCFunctionData(ctx, js_document_wrapper, 1, 0, 1, doc_funcs);
+    JS_FreeValue(ctx, (JSValue)doc_funcs[0]);
+    if (JS_IsException(document_fn))
+        goto done;
+
+    doc_funcs[0] = JS_DupValue(ctx, document_get_canonical);
+    document_canonical_fn = JS_NewCFunctionData(ctx, js_document_wrapper, 1, 0, 1, doc_funcs);
+    JS_FreeValue(ctx, (JSValue)doc_funcs[0]);
+    if (JS_IsException(document_canonical_fn))
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "document",
+                                  JS_DupValue(ctx, document_fn),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  document_fn,
+                                  "canonical",
+                                  JS_DupValue(ctx, document_canonical_fn),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_PreventExtensions(ctx, document_fn) < 0)
+        goto done;
+    if (JS_PreventExtensions(ctx, document_canonical_fn) < 0)
+        goto done;
+
+    canon_obj = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(canon_obj))
+        goto done;
+
+    canon_unwrap_fn = JS_NewCFunction(ctx, js_canon_unwrap, "unwrap", 1);
+    if (JS_IsException(canon_unwrap_fn))
+        goto done;
+
+    canon_at_fn = JS_NewCFunction(ctx, js_canon_at, "at", 2);
+    if (JS_IsException(canon_at_fn))
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  canon_obj,
+                                  "unwrap",
+                                  JS_DupValue(ctx, canon_unwrap_fn),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  canon_obj,
+                                  "at",
+                                  JS_DupValue(ctx, canon_at_fn),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_PreventExtensions(ctx, canon_unwrap_fn) < 0)
+        goto done;
+    if (JS_PreventExtensions(ctx, canon_at_fn) < 0)
+        goto done;
+    if (JS_PreventExtensions(ctx, canon_obj) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "canon",
+                                  JS_DupValue(ctx, canon_obj),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "event",
+                                  JS_DupValue(ctx, event_val),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "eventCanonical",
+                                  JS_DupValue(ctx, event_canonical_val),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "steps",
+                                  JS_DupValue(ctx, steps_val),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    ret = 0;
+
+done:
+    if (!JS_IsUndefined(host_v1))
+        JS_FreeValue(ctx, host_v1);
+    if (!JS_IsUndefined(host))
+        JS_FreeValue(ctx, host);
+    if (!JS_IsUndefined(global))
+        JS_FreeValue(ctx, global);
+    if (!JS_IsUndefined(document_ns))
+        JS_FreeValue(ctx, document_ns);
+    if (!JS_IsUndefined(document_get))
+        JS_FreeValue(ctx, document_get);
+    if (!JS_IsUndefined(document_get_canonical))
+        JS_FreeValue(ctx, document_get_canonical);
+    if (!JS_IsUndefined(document_fn))
+        JS_FreeValue(ctx, document_fn);
+    if (!JS_IsUndefined(document_canonical_fn))
+        JS_FreeValue(ctx, document_canonical_fn);
+    if (!JS_IsUndefined(canon_obj))
+        JS_FreeValue(ctx, canon_obj);
+    if (!JS_IsUndefined(canon_unwrap_fn))
+        JS_FreeValue(ctx, canon_unwrap_fn);
+    if (!JS_IsUndefined(canon_at_fn))
+        JS_FreeValue(ctx, canon_at_fn);
+    if (!JS_IsUndefined(event_val))
+        JS_FreeValue(ctx, event_val);
+    if (!JS_IsUndefined(event_canonical_val))
+        JS_FreeValue(ctx, event_canonical_val);
+    if (!JS_IsUndefined(steps_val))
+        JS_FreeValue(ctx, steps_val);
+    return ret;
+}

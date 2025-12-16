@@ -35,6 +35,7 @@ int JS_ParseHostResponse(JSContext *ctx,
                          JSHostResponse *out);
 void JS_FreeHostResponse(JSContext *ctx, JSHostResponse *resp);
 int JS_InitHostFromManifest(JSContext *ctx, const uint8_t *manifest_bytes, size_t manifest_size);
+int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t context_blob_size);
 void JS_FreeHostManifest(JSContext *ctx);
 
 #endif /* QUICKJS_HOST_H */

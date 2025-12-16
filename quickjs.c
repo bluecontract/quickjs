@@ -3131,6 +3131,15 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
         return -1;
     }
 
+    if (context_copy && options->context_blob_size > 0) {
+        if (JS_InitErgonomicGlobals(ctx, context_copy, options->context_blob_size) != 0) {
+            JS_FreeHostManifest(ctx);
+            js_free_rt(ctx->rt, manifest_copy);
+            js_free_rt(ctx->rt, context_copy);
+            return -1;
+        }
+    }
+
     memcpy(ctx->abi_manifest_hash, computed_hash, sizeof(computed_hash));
     js_sha256_to_hex(computed_hash, ctx->abi_manifest_hash_hex);
     ctx->abi_manifest_bytes = manifest_copy;
