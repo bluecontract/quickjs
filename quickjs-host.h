@@ -23,6 +23,8 @@ typedef struct JSHostResponse {
     JSValue err_details;
 } JSHostResponse;
 
+typedef struct JSHostManifest JSHostManifest;
+
 /* Host response envelope helpers (T-039). */
 JSValue JS_ThrowHostError(JSContext *ctx, JSAtom code_atom, JSAtom tag_atom, JSValueConst details);
 JSValue JS_ThrowHostTransportError(JSContext *ctx);
@@ -32,5 +34,7 @@ int JS_ParseHostResponse(JSContext *ctx,
                          const JSHostResponseValidation *validation,
                          JSHostResponse *out);
 void JS_FreeHostResponse(JSContext *ctx, JSHostResponse *resp);
+int JS_InitHostFromManifest(JSContext *ctx, const uint8_t *manifest_bytes, size_t manifest_size);
+void JS_FreeHostManifest(JSContext *ctx);
 
 #endif /* QUICKJS_HOST_H */

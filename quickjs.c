@@ -2889,9 +2889,6 @@ static int js_deterministic_init_host(JSContext *ctx)
     if (ret < 0)
         goto fail;
 
-    if (JS_PreventExtensions(ctx, host_v1) < 0 || JS_PreventExtensions(ctx, host_ns) < 0)
-        goto fail;
-
     JS_FreeValue(ctx, host_ns);
     JS_FreeValue(ctx, host_v1);
 
@@ -3125,6 +3122,13 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
             return -1;
         }
         memcpy(context_copy, options->context_blob, options->context_blob_size);
+    }
+
+    if (JS_InitHostFromManifest(ctx, manifest_copy, options->manifest_size) != 0) {
+        js_free_rt(ctx->rt, manifest_copy);
+        if (context_copy)
+            js_free_rt(ctx->rt, context_copy);
+        return -1;
     }
 
     memcpy(ctx->abi_manifest_hash, computed_hash, sizeof(computed_hash));
@@ -3549,6 +3553,7 @@ void JS_FreeContext(JSContext *ctx)
     }
 #endif
 
+    JS_FreeHostManifest(ctx);
     js_free_modules(ctx, JS_FREE_MODULE_ALL);
 
     JS_FreeValue(ctx, ctx->global_obj);
