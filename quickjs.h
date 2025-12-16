@@ -343,6 +343,9 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
 
+#define JS_DETERMINISTIC_MAX_MANIFEST_BYTES 1048576
+#define JS_DETERMINISTIC_MAX_CONTEXT_BLOB_BYTES 1048576
+
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
 typedef JSValue JSCFunctionData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data);
@@ -388,6 +391,15 @@ JS_BOOL JS_IsLiveObject(JSRuntime *rt, JSValueConst obj);
 
 JSContext *JS_NewContext(JSRuntime *rt);
 int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx);
+typedef struct JSDeterministicInitOptions {
+    const uint8_t *manifest_bytes;
+    size_t manifest_size;
+    const char *manifest_hash_hex;
+    const uint8_t *context_blob;
+    size_t context_blob_size;
+    uint64_t gas_limit;
+} JSDeterministicInitOptions;
+int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions *options);
 void JS_FreeContext(JSContext *s);
 JSContext *JS_DupContext(JSContext *ctx);
 void *JS_GetContextOpaque(JSContext *ctx);

@@ -42,6 +42,7 @@
 
 #include "cutils.h"
 #include "list.h"
+#include "quickjs-internal.h"
 #include "quickjs.h"
 #include "libregexp.h"
 #include "libunicode.h"
@@ -499,6 +500,13 @@ struct JSContext {
     uint64_t gas_limit;
     uint64_t gas_remaining;
     uint32_t gas_version;
+
+    uint8_t *abi_manifest_bytes;
+    size_t abi_manifest_size;
+    uint8_t abi_manifest_hash[32];
+    char abi_manifest_hash_hex[65];
+    uint8_t *deterministic_context_blob;
+    size_t deterministic_context_blob_size;
 
     JSGasTraceData *gas_trace;
     BOOL deterministic_mode;
@@ -2941,6 +2949,151 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
     return 0;
 }
 
+static JSValue JS_ThrowManifestError(JSContext *ctx, const char *code, const char *message)
+{
+    JSValue obj, name, msg, code_val;
+
+    obj = JS_NewError(ctx);
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+
+    name = JS_NewString(ctx, "ManifestError");
+    msg = JS_NewString(ctx, message);
+    code_val = JS_NewString(ctx, code);
+    if (JS_IsException(name) || JS_IsException(msg) || JS_IsException(code_val)) {
+        if (!JS_IsException(name))
+            JS_FreeValue(ctx, name);
+        if (!JS_IsException(msg))
+            JS_FreeValue(ctx, msg);
+        if (!JS_IsException(code_val))
+            JS_FreeValue(ctx, code_val);
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+
+    JS_DefinePropertyValue(ctx, obj, JS_ATOM_name, name,
+                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValue(ctx, obj, JS_ATOM_message, msg,
+                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_DefinePropertyValueStr(ctx, obj, "code", code_val,
+                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+    JS_Throw(ctx, obj);
+    return JS_EXCEPTION;
+}
+
+static int js_hex_nibble(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
+}
+
+static int js_parse_hash_hex(JSContext *ctx, const char *hex, uint8_t *out, size_t out_size)
+{
+    size_t hex_len, i;
+
+    if (!hex || !out)
+        return -1;
+
+    hex_len = strlen(hex);
+    if (hex_len != out_size * 2) {
+        JS_ThrowTypeError(ctx, "abi manifest hash must be 64 lowercase hex characters");
+        return -1;
+    }
+
+    for(i = 0; i < out_size; i++) {
+        int high = js_hex_nibble(hex[i * 2]);
+        int low = js_hex_nibble(hex[i * 2 + 1]);
+        if (high < 0 || low < 0) {
+            JS_ThrowTypeError(ctx, "abi manifest hash must be 64 lowercase hex characters");
+            return -1;
+        }
+        out[i] = (uint8_t)((high << 4) | low);
+    }
+
+    return 0;
+}
+
+int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions *options)
+{
+    uint8_t computed_hash[32];
+    uint8_t expected_hash[32];
+    uint8_t *manifest_copy = NULL;
+    uint8_t *context_copy = NULL;
+
+    if (!ctx || !options)
+        return -1;
+
+    if (ctx->abi_manifest_bytes) {
+        JS_ThrowTypeError(ctx, "abi manifest is already initialized");
+        return -1;
+    }
+
+    if (!options->manifest_bytes || options->manifest_size == 0) {
+        JS_ThrowTypeError(ctx, "abi manifest is required");
+        return -1;
+    }
+
+    if (options->manifest_size > JS_DETERMINISTIC_MAX_MANIFEST_BYTES) {
+        JS_ThrowTypeError(ctx, "abi manifest exceeds maximum size");
+        return -1;
+    }
+
+    if (!options->manifest_hash_hex) {
+        JS_ThrowTypeError(ctx, "abi manifest hash is required");
+        return -1;
+    }
+
+    if (js_parse_hash_hex(ctx, options->manifest_hash_hex, expected_hash, sizeof(expected_hash)) != 0)
+        return -1;
+
+    if (options->context_blob_size > 0 && !options->context_blob) {
+        JS_ThrowTypeError(ctx, "context blob is required when context_blob_size is set");
+        return -1;
+    }
+
+    js_sha256(options->manifest_bytes, options->manifest_size, computed_hash);
+    if (memcmp(computed_hash, expected_hash, sizeof(expected_hash)) != 0) {
+        JS_ThrowManifestError(ctx, "ABI_MANIFEST_HASH_MISMATCH", "abi manifest hash mismatch");
+        return -1;
+    }
+
+    manifest_copy = js_malloc_rt(ctx->rt, options->manifest_size);
+    if (!manifest_copy) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+    memcpy(manifest_copy, options->manifest_bytes, options->manifest_size);
+
+    if (options->context_blob && options->context_blob_size > 0) {
+        if (options->context_blob_size > JS_DETERMINISTIC_MAX_CONTEXT_BLOB_BYTES) {
+            js_free_rt(ctx->rt, manifest_copy);
+            JS_ThrowTypeError(ctx, "context blob exceeds maximum size");
+            return -1;
+        }
+
+        context_copy = js_malloc_rt(ctx->rt, options->context_blob_size);
+        if (!context_copy) {
+            js_free_rt(ctx->rt, manifest_copy);
+            JS_ThrowOutOfMemory(ctx);
+            return -1;
+        }
+        memcpy(context_copy, options->context_blob, options->context_blob_size);
+    }
+
+    memcpy(ctx->abi_manifest_hash, computed_hash, sizeof(computed_hash));
+    js_sha256_to_hex(computed_hash, ctx->abi_manifest_hash_hex);
+    ctx->abi_manifest_bytes = manifest_copy;
+    ctx->abi_manifest_size = options->manifest_size;
+    ctx->deterministic_context_blob = context_copy;
+    ctx->deterministic_context_blob_size = context_copy ? options->context_blob_size : 0;
+    JS_SetGasLimit(ctx, options->gas_limit);
+
+    return 0;
+}
+
 void *JS_GetContextOpaque(JSContext *ctx)
 {
     return ctx->user_opaque;
@@ -3261,6 +3414,11 @@ void JS_FreeContext(JSContext *ctx)
     js_free_shape_null(ctx->rt, ctx->mapped_arguments_shape);
     js_free_shape_null(ctx->rt, ctx->regexp_shape);
     js_free_shape_null(ctx->rt, ctx->regexp_result_shape);
+
+    if (ctx->abi_manifest_bytes)
+        js_free_rt(ctx->rt, ctx->abi_manifest_bytes);
+    if (ctx->deterministic_context_blob)
+        js_free_rt(ctx->rt, ctx->deterministic_context_blob);
 
     list_del(&ctx->link);
     remove_gc_object(&ctx->header);
