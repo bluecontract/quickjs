@@ -451,9 +451,17 @@ struct JSHostManifest {
     size_t function_count;
 };
 
+typedef struct {
+    JSHostTapeRecord *records;
+    size_t capacity;
+    size_t count;
+    size_t head;
+} JSHostTapeState;
+
 typedef struct JSHostManifestNode {
     JSContext *ctx;
     JSHostManifest manifest;
+    JSHostTapeState tape;
     struct JSHostManifestNode *next;
 } JSHostManifestNode;
 
@@ -468,6 +476,25 @@ static JSHostManifest *js_host_find_manifest(JSContext *ctx)
         node = node->next;
     }
     return NULL;
+}
+
+static JSHostManifestNode *js_host_find_manifest_node(JSContext *ctx)
+{
+    JSHostManifestNode *node = js_host_manifest_list;
+    while (node) {
+        if (node->ctx == ctx)
+            return node;
+        node = node->next;
+    }
+    return NULL;
+}
+
+static JSHostTapeState *js_host_get_tape(JSContext *ctx)
+{
+    JSHostManifestNode *node = js_host_find_manifest_node(ctx);
+    if (!node)
+        return NULL;
+    return &node->tape;
 }
 
 static void js_host_free_function(JSContext *ctx, JSHostFunctionDef *fn)
@@ -519,6 +546,67 @@ static void js_host_manifest_clear(JSContext *ctx, JSHostManifest *manifest)
     manifest->function_count = 0;
 }
 
+static void js_host_tape_free(JSContext *ctx, JSHostTapeState *tape)
+{
+    if (!tape)
+        return;
+
+    if (tape->records)
+        js_free(ctx, tape->records);
+
+    tape->records = NULL;
+    tape->capacity = 0;
+    tape->count = 0;
+    tape->head = 0;
+}
+
+static int js_host_calc_gas_charges(const JSHostFunctionDef *fn,
+                                    size_t req_len,
+                                    size_t resp_len,
+                                    uint32_t units,
+                                    uint64_t *out_pre,
+                                    uint64_t *out_post)
+{
+    uint64_t pre = 0;
+    uint64_t post = 0;
+    uint64_t arg_part = 0;
+    uint64_t resp_part = 0;
+    uint64_t unit_part = 0;
+
+    if (!fn)
+        return -1;
+
+    pre = fn->gas_base;
+    arg_part = (uint64_t)fn->gas_k_arg_bytes * (uint64_t)req_len;
+    if (arg_part > UINT64_MAX - pre)
+        return -1;
+    pre += arg_part;
+
+    resp_part = (uint64_t)fn->gas_k_ret_bytes * (uint64_t)resp_len;
+    unit_part = (uint64_t)fn->gas_k_units * (uint64_t)units;
+    if (resp_part > UINT64_MAX - unit_part)
+        return -1;
+    post = resp_part + unit_part;
+
+    if (out_pre)
+        *out_pre = pre;
+    if (out_post)
+        *out_post = post;
+    return 0;
+}
+
+static void js_host_tape_append(JSHostTapeState *tape, const JSHostTapeRecord *record)
+{
+    if (!tape || !record || tape->capacity == 0 || !tape->records)
+        return;
+
+    size_t idx = tape->head;
+    tape->records[idx] = *record;
+    if (tape->count < tape->capacity)
+        tape->count++;
+    tape->head = (tape->head + 1) % tape->capacity;
+}
+
 void JS_FreeHostManifest(JSContext *ctx)
 {
     JSHostManifestNode *prev = NULL;
@@ -532,12 +620,105 @@ void JS_FreeHostManifest(JSContext *ctx)
                 js_host_manifest_list = node->next;
 
             js_host_manifest_clear(ctx, &node->manifest);
+            js_host_tape_free(ctx, &node->tape);
             js_free(ctx, node);
             return;
         }
         prev = node;
         node = node->next;
     }
+}
+
+int JS_EnableHostTape(JSContext *ctx, size_t capacity)
+{
+    JSHostTapeState *tape = js_host_get_tape(ctx);
+    JSHostTapeRecord *records = NULL;
+
+    if (!ctx)
+        return -1;
+
+    if (!tape) {
+        JS_ThrowTypeError(ctx, "host manifest is not initialized");
+        return -1;
+    }
+
+    if (capacity > JS_HOST_TAPE_MAX_CAPACITY) {
+        JS_ThrowTypeError(ctx, "tape capacity exceeds max (%u)", JS_HOST_TAPE_MAX_CAPACITY);
+        return -1;
+    }
+
+    if (capacity == 0) {
+        js_host_tape_free(ctx, tape);
+        return 0;
+    }
+
+    records = js_mallocz(ctx, sizeof(JSHostTapeRecord) * capacity);
+    if (!records)
+        return -1;
+
+    js_host_tape_free(ctx, tape);
+    tape->records = records;
+    tape->capacity = capacity;
+    tape->count = 0;
+    tape->head = 0;
+    return 0;
+}
+
+int JS_ResetHostTape(JSContext *ctx)
+{
+    JSHostTapeState *tape = js_host_get_tape(ctx);
+
+    if (!ctx)
+        return -1;
+
+    if (!tape) {
+        JS_ThrowTypeError(ctx, "host manifest is not initialized");
+        return -1;
+    }
+
+    if (tape->records && tape->capacity > 0)
+        memset(tape->records, 0, sizeof(JSHostTapeRecord) * tape->capacity);
+
+    tape->count = 0;
+    tape->head = 0;
+    return 0;
+}
+
+size_t JS_GetHostTapeLength(JSContext *ctx)
+{
+    JSHostTapeState *tape = js_host_get_tape(ctx);
+    if (!tape)
+        return 0;
+    return tape->count;
+}
+
+int JS_ReadHostTape(JSContext *ctx, JSHostTapeRecord *out_records, size_t max_records, size_t *out_count)
+{
+    JSHostTapeState *tape = js_host_get_tape(ctx);
+    size_t to_copy = 0;
+
+    if (!ctx)
+        return -1;
+
+    if (!tape) {
+        JS_ThrowTypeError(ctx, "host manifest is not initialized");
+        return -1;
+    }
+
+    if (out_count)
+        *out_count = tape->count;
+
+    if (!out_records || max_records == 0 || tape->count == 0 || tape->capacity == 0 || !tape->records)
+        return 0;
+
+    to_copy = tape->count < max_records ? tape->count : max_records;
+    size_t start = (tape->head + tape->capacity - tape->count) % tape->capacity;
+    for (size_t i = 0; i < to_copy; i++) {
+        size_t idx = (start + i) % tape->capacity;
+        out_records[i] = tape->records[idx];
+    }
+
+    return 0;
 }
 
 static int js_host_manifest_error(JSContext *ctx, const char *path, const char *message)
@@ -1512,6 +1693,15 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
     JSHostResponse resp;
     JSHostCallResult result = {0};
     JSValue ret = JS_EXCEPTION;
+    JSHostTapeState *tape_state = js_host_get_tape(ctx);
+    int tape_enabled = tape_state && tape_state->capacity > 0 && tape_state->records;
+    uint8_t tape_req_hash[32];
+    uint8_t tape_resp_hash[32];
+    uint32_t tape_req_len = 0;
+    uint32_t tape_resp_len = 0;
+    uint64_t tape_gas_pre = 0;
+    uint64_t tape_gas_post = 0;
+    int tape_charge_failed = 0;
 
     if (!manifest) {
         JS_ThrowTypeError(ctx, "host manifest is not initialized");
@@ -1592,6 +1782,15 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
         return JS_EXCEPTION;
     }
 
+    if (tape_enabled) {
+        memset(tape_req_hash, 0, sizeof(tape_req_hash));
+        memset(tape_resp_hash, 0, sizeof(tape_resp_hash));
+        tape_req_len = (uint32_t)req_buf.length;
+        if (js_host_calc_gas_charges(fn, req_buf.length, 0, 0, &tape_gas_pre, NULL))
+            tape_gas_pre = 0;
+        js_sha256(req_buf.data, req_buf.length, tape_req_hash);
+    }
+
     JS_FreeValue(ctx, args_array);
     args_array = JS_UNDEFINED;
 
@@ -1618,6 +1817,11 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
 
     JS_FreeDVBuffer(ctx, &req_buf);
 
+    if (tape_enabled) {
+        tape_resp_len = (uint32_t)result.length;
+        js_sha256(result.data, result.length, tape_resp_hash);
+    }
+
     JSHostResponseValidation validation = {
         .max_units = fn->max_units,
         .errors = fn->errors,
@@ -1627,7 +1831,29 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
     if (JS_ParseHostResponse(ctx, result.data, result.length, &validation, &resp))
         return JS_EXCEPTION;
 
-    if (js_host_charge_post(ctx, fn, result.length, resp.units)) {
+    if (tape_enabled) {
+        if (js_host_calc_gas_charges(fn, tape_req_len, tape_resp_len, resp.units, NULL, &tape_gas_post))
+            tape_gas_post = 0;
+    }
+
+    tape_charge_failed = js_host_charge_post(ctx, fn, result.length, resp.units);
+
+    if (tape_enabled) {
+        JSHostTapeRecord rec = {0};
+        rec.fn_id = fn->fn_id;
+        rec.req_len = tape_req_len;
+        rec.resp_len = tape_resp_len;
+        rec.units = resp.units;
+        rec.gas_pre = tape_gas_pre;
+        rec.gas_post = tape_gas_post;
+        rec.is_error = resp.is_error;
+        rec.charge_failed = tape_charge_failed;
+        memcpy(rec.req_hash, tape_req_hash, sizeof(rec.req_hash));
+        memcpy(rec.resp_hash, tape_resp_hash, sizeof(rec.resp_hash));
+        js_host_tape_append(tape_state, &rec);
+    }
+
+    if (tape_charge_failed) {
         JS_FreeHostResponse(ctx, &resp);
         return JS_EXCEPTION;
     }
@@ -1789,12 +2015,13 @@ int JS_InitHostFromManifest(JSContext *ctx, const uint8_t *manifest_bytes, size_
     if (js_host_validate_manifest(ctx, manifest_val, &manifest))
         goto done;
 
-    node = js_malloc(ctx, sizeof(JSHostManifestNode));
+    node = js_mallocz(ctx, sizeof(JSHostManifestNode));
     if (!node)
         goto done;
 
     node->ctx = ctx;
     node->manifest = manifest;
+    node->tape = (JSHostTapeState){0};
     node->next = NULL;
     memset(&manifest, 0, sizeof(manifest)); /* ownership moved */
 

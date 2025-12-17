@@ -38,4 +38,25 @@ int JS_InitHostFromManifest(JSContext *ctx, const uint8_t *manifest_bytes, size_
 int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t context_blob_size);
 void JS_FreeHostManifest(JSContext *ctx);
 
+/* Optional host-call tape (T-043). */
+#define JS_HOST_TAPE_MAX_CAPACITY 1024
+
+typedef struct JSHostTapeRecord {
+    uint32_t fn_id;
+    uint32_t req_len;
+    uint32_t resp_len;
+    uint32_t units;
+    uint64_t gas_pre;
+    uint64_t gas_post;
+    int is_error;
+    int charge_failed;
+    uint8_t req_hash[32];
+    uint8_t resp_hash[32];
+} JSHostTapeRecord;
+
+int JS_EnableHostTape(JSContext *ctx, size_t capacity);
+int JS_ResetHostTape(JSContext *ctx);
+size_t JS_GetHostTapeLength(JSContext *ctx);
+int JS_ReadHostTape(JSContext *ctx, JSHostTapeRecord *out_records, size_t max_records, size_t *out_count);
+
 #endif /* QUICKJS_HOST_H */
