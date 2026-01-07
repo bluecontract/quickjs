@@ -2416,515 +2416,54 @@ JSContext *JS_NewContext(JSRuntime *rt)
     return ctx;
 }
 
-enum {
-    JS_DETERMINISTIC_DISABLED_EVAL = 1,
-    JS_DETERMINISTIC_DISABLED_FUNCTION = 2,
-    JS_DETERMINISTIC_DISABLED_RANDOM = 3,
-    JS_DETERMINISTIC_DISABLED_PROMISE = 4,
-    JS_DETERMINISTIC_DISABLED_REGEXP = 5,
-    JS_DETERMINISTIC_DISABLED_PROXY = 6,
-    JS_DETERMINISTIC_DISABLED_TYPED_ARRAY = 7,
-    JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER = 8,
-    JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER = 9,
-    JS_DETERMINISTIC_DISABLED_DATAVIEW = 10,
-    JS_DETERMINISTIC_DISABLED_WEBASSEMBLY = 11,
-    JS_DETERMINISTIC_DISABLED_ATOMICS = 12,
-    JS_DETERMINISTIC_DISABLED_CONSOLE = 13,
-    JS_DETERMINISTIC_DISABLED_PRINT = 14,
-    JS_DETERMINISTIC_DISABLED_JSON_PARSE = 15,
-    JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY = 16,
-    JS_DETERMINISTIC_DISABLED_ARRAY_SORT = 17,
-};
-
-static const char *js_get_disabled_name(int magic)
+void js_deterministic_clear_eval_obj(JSContext *ctx)
 {
-    switch (magic) {
-    case JS_DETERMINISTIC_DISABLED_ARRAY_SORT:
-        return "Array.prototype.sort";
-    case JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY:
-        return "JSON.stringify";
-    case JS_DETERMINISTIC_DISABLED_JSON_PARSE:
-        return "JSON.parse";
-    case JS_DETERMINISTIC_DISABLED_PRINT:
-        return "print";
-    case JS_DETERMINISTIC_DISABLED_CONSOLE:
-        return "console";
-    case JS_DETERMINISTIC_DISABLED_ATOMICS:
-        return "Atomics";
-    case JS_DETERMINISTIC_DISABLED_WEBASSEMBLY:
-        return "WebAssembly";
-    case JS_DETERMINISTIC_DISABLED_DATAVIEW:
-        return "DataView";
-    case JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER:
-        return "SharedArrayBuffer";
-    case JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER:
-        return "ArrayBuffer";
-    case JS_DETERMINISTIC_DISABLED_TYPED_ARRAY:
-        return "Typed arrays";
-    case JS_DETERMINISTIC_DISABLED_PROXY:
-        return "Proxy";
-    case JS_DETERMINISTIC_DISABLED_REGEXP:
-        return "RegExp";
-    case JS_DETERMINISTIC_DISABLED_PROMISE:
-        return "Promise";
-    case JS_DETERMINISTIC_DISABLED_RANDOM:
-        return "Math.random";
-    case JS_DETERMINISTIC_DISABLED_FUNCTION:
-        return "Function";
-    case JS_DETERMINISTIC_DISABLED_EVAL:
-    default:
-        return "eval";
-    }
-}
-
-static JSValue js_deterministic_disabled(JSContext *ctx, JSValueConst this_val,
-                                         int argc, JSValueConst *argv, int magic)
-{
-    const char *name = js_get_disabled_name(magic);
-    if (magic == JS_DETERMINISTIC_DISABLED_TYPED_ARRAY)
-        return JS_ThrowTypeError(ctx, "%s are disabled in deterministic mode", name);
-    return JS_ThrowTypeError(ctx, "%s is disabled in deterministic mode", name);
-}
-
-static int js_deterministic_define_disabled_global(JSContext *ctx, const char *name,
-                                                   int length, int magic)
-{
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, name, length,
-                              JS_CFUNC_constructor_or_func_magic, magic);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValueStr(ctx, ctx->global_obj, name, JS_DupValue(ctx, fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_FreeValue(ctx, fn);
-    if (ret < 0)
-        return -1;
-
-    return 0;
-}
-
-static JSValue js_deterministic_compile_regexp(JSContext *ctx, JSValueConst pattern,
-                                               JSValueConst flags)
-{
-    (void)pattern;
-    (void)flags;
-    return JS_ThrowTypeError(ctx, "RegExp is disabled in deterministic mode");
-}
-
-static int js_deterministic_disable_eval(JSContext *ctx)
-{
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "eval", 1,
-                              JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_EVAL);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_eval, JS_DupValue(ctx, fn),
-                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0) {
-        JS_FreeValue(ctx, fn);
-        return -1;
-    }
-
     JS_FreeValue(ctx, ctx->eval_obj);
     ctx->eval_obj = JS_UNDEFINED;
-    JS_FreeValue(ctx, fn);
-    return 0;
 }
 
-static int js_deterministic_disable_function(JSContext *ctx)
+void js_deterministic_set_regexp(JSContext *ctx, JSValueConst ctor, JSCompileRegExpFunc compile_regexp)
 {
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Function", 1,
-                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_FUNCTION);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Function, JS_DupValue(ctx, fn),
-                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_FreeValue(ctx, fn);
-    if (ret < 0)
-        return -1;
-
-    return 0;
-}
-
-static int js_deterministic_disable_random(JSContext *ctx)
-{
-    JSValue math, fn;
-    int ret;
-
-    math = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_Math);
-    if (JS_IsException(math))
-        return -1;
-    if (!JS_IsObject(math)) {
-        JS_FreeValue(ctx, math);
-        return -1;
-    }
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "random", 0,
-                              JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_RANDOM);
-    if (JS_IsException(fn)) {
-        JS_FreeValue(ctx, math);
-        return -1;
-    }
-
-    ret = JS_DefinePropertyValueStr(ctx, math, "random", JS_DupValue(ctx, fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-
-    JS_FreeValue(ctx, fn);
-    JS_FreeValue(ctx, math);
-    if (ret < 0)
-        return -1;
-
-    return 0;
-}
-
-static int js_deterministic_disable_regexp(JSContext *ctx)
-{
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "RegExp", 2,
-                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_REGEXP);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_RegExp, JS_DupValue(ctx, fn),
-                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0) {
-        JS_FreeValue(ctx, fn);
-        return -1;
-    }
-
     JS_FreeValue(ctx, ctx->regexp_ctor);
-    ctx->regexp_ctor = JS_DupValue(ctx, fn);
-    ctx->compile_regexp = js_deterministic_compile_regexp;
-
-    JS_FreeValue(ctx, fn);
-    return 0;
+    ctx->regexp_ctor = JS_DupValue(ctx, ctor);
+    ctx->compile_regexp = compile_regexp;
 }
 
-static int js_deterministic_disable_proxy(JSContext *ctx)
+void js_deterministic_set_promise_ctor(JSContext *ctx, JSValueConst ctor)
 {
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Proxy", 2,
-                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_PROXY);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Proxy, JS_DupValue(ctx, fn),
-                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_FreeValue(ctx, fn);
-    if (ret < 0)
-        return -1;
-
-    return 0;
-}
-
-static int js_deterministic_disable_promise(JSContext *ctx)
-{
-    JSValue fn;
-    int ret;
-
-    fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "Promise", 1,
-                              JS_CFUNC_constructor_or_func_magic, JS_DETERMINISTIC_DISABLED_PROMISE);
-    if (JS_IsException(fn))
-        return -1;
-
-    ret = JS_DefinePropertyValue(ctx, ctx->global_obj, JS_ATOM_Promise, JS_DupValue(ctx, fn),
-                                 JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                     JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-
-    /* Ensure async internals see the disabled ctor */
     JS_FreeValue(ctx, ctx->promise_ctor);
-    ctx->promise_ctor = JS_DupValue(ctx, fn);
-
-    /* Mirror common Promise statics to the same disabled stub */
-    JS_DefinePropertyValueStr(ctx, fn, "resolve", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, fn, "reject", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, fn, "all", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, fn, "race", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, fn, "any", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    JS_DefinePropertyValueStr(ctx, fn, "allSettled", JS_DupValue(ctx, fn),
-                              JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                  JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-
-    JS_FreeValue(ctx, fn);
-    if (ret < 0)
-        return -1;
-
-    return 0;
+    ctx->promise_ctor = JS_DupValue(ctx, ctor);
 }
 
-static int js_deterministic_disable_typed_arrays(JSContext *ctx)
+void js_deterministic_set_random_state(JSContext *ctx, uint32_t state)
 {
-    static const struct {
-        const char *name;
-        int length;
-        int magic;
-    } entries[] = {
-        { "ArrayBuffer", 1, JS_DETERMINISTIC_DISABLED_ARRAY_BUFFER },
-        { "SharedArrayBuffer", 1, JS_DETERMINISTIC_DISABLED_SHARED_ARRAY_BUFFER },
-        { "DataView", 3, JS_DETERMINISTIC_DISABLED_DATAVIEW },
-        { "Uint8Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Uint8ClampedArray", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Int8Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Uint16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Int16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Uint32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Int32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "BigInt64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "BigUint64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Float16Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Float32Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-        { "Float64Array", 3, JS_DETERMINISTIC_DISABLED_TYPED_ARRAY },
-    };
-
-    for (size_t i = 0; i < countof(entries); i++) {
-        if (js_deterministic_define_disabled_global(ctx, entries[i].name,
-                                                    entries[i].length, entries[i].magic))
-            return -1;
-    }
-    return 0;
+    ctx->random_state = state;
 }
 
-static int js_deterministic_disable_webassembly(JSContext *ctx)
+void js_deterministic_set_mode(JSContext *ctx, BOOL enabled)
 {
-    return js_deterministic_define_disabled_global(ctx, "WebAssembly", 1,
-                                                   JS_DETERMINISTIC_DISABLED_WEBASSEMBLY);
+    ctx->deterministic_mode = enabled ? TRUE : FALSE;
 }
 
-static int js_deterministic_disable_atomics(JSContext *ctx)
+BOOL js_deterministic_manifest_is_initialized(JSContext *ctx)
 {
-    return js_deterministic_define_disabled_global(ctx, "Atomics", 3,
-                                                   JS_DETERMINISTIC_DISABLED_ATOMICS);
+    return ctx->abi_manifest_bytes != NULL;
 }
 
-static int js_deterministic_disable_console(JSContext *ctx)
+void js_deterministic_set_manifest_state(JSContext *ctx,
+                                         uint8_t *manifest_bytes,
+                                         size_t manifest_size,
+                                         const uint8_t hash[32],
+                                         const char hash_hex[65],
+                                         uint8_t *context_blob,
+                                         size_t context_blob_size)
 {
-    JSValue console;
-
-    console = JS_NewObjectProto(ctx, JS_NULL);
-    if (JS_IsException(console))
-        return -1;
-
-    static const char *const methods[] = { "log", "info", "warn", "error", "debug" };
-    for (size_t i = 0; i < countof(methods); i++) {
-        JSValue fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "console", 1,
-                                          JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_CONSOLE);
-        if (JS_IsException(fn)) {
-            JS_FreeValue(ctx, console);
-            return -1;
-        }
-        if (JS_DefinePropertyValueStr(ctx, console, methods[i], JS_DupValue(ctx, fn),
-                                      JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                          JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE) < 0) {
-            JS_FreeValue(ctx, fn);
-            JS_FreeValue(ctx, console);
-            return -1;
-        }
-        JS_FreeValue(ctx, fn);
-    }
-
-    if (JS_DefinePropertyValueStr(ctx, ctx->global_obj, "console", JS_DupValue(ctx, console),
-                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                      JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE) < 0) {
-        JS_FreeValue(ctx, console);
-        return -1;
-    }
-
-    JS_FreeValue(ctx, console);
-    return 0;
-}
-
-static int js_deterministic_disable_print(JSContext *ctx)
-{
-    return js_deterministic_define_disabled_global(ctx, "print", 1,
-                                                   JS_DETERMINISTIC_DISABLED_PRINT);
-}
-
-static int js_deterministic_disable_json(JSContext *ctx)
-{
-    JSValue json, parse_fn, stringify_fn;
-    int ret;
-
-    json = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_JSON);
-    if (JS_IsException(json))
-        return -1;
-    if (!JS_IsObject(json)) {
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-
-    parse_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "parse", 2,
-                                    JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_PARSE);
-    if (JS_IsException(parse_fn)) {
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-    stringify_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "stringify", 3,
-                                        JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY);
-    if (JS_IsException(stringify_fn)) {
-        JS_FreeValue(ctx, parse_fn);
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-
-    ret = JS_DefinePropertyValueStr(ctx, json, "parse", JS_DupValue(ctx, parse_fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    ret = JS_DefinePropertyValueStr(ctx, json, "stringify", JS_DupValue(ctx, stringify_fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    JS_FreeValue(ctx, parse_fn);
-    JS_FreeValue(ctx, stringify_fn);
-    JS_FreeValue(ctx, json);
-    return 0;
-
-fail:
-    JS_FreeValue(ctx, parse_fn);
-    JS_FreeValue(ctx, stringify_fn);
-    JS_FreeValue(ctx, json);
-    return -1;
-}
-
-static int js_deterministic_disable_array_sort(JSContext *ctx)
-{
-    JSValue array_ctor, array_proto, sort_fn;
-    int ret;
-
-    array_ctor = JS_GetProperty(ctx, ctx->global_obj, JS_ATOM_Array);
-    if (JS_IsException(array_ctor))
-        return -1;
-    if (!JS_IsObject(array_ctor)) {
-        JS_FreeValue(ctx, array_ctor);
-        return -1;
-    }
-
-    array_proto = JS_GetProperty(ctx, array_ctor, JS_ATOM_prototype);
-    if (JS_IsException(array_proto)) {
-        JS_FreeValue(ctx, array_ctor);
-        return -1;
-    }
-    JS_FreeValue(ctx, array_ctor);
-    if (!JS_IsObject(array_proto)) {
-        JS_FreeValue(ctx, array_proto);
-        return -1;
-    }
-
-    sort_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "sort", 1,
-                                   JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_ARRAY_SORT);
-    if (JS_IsException(sort_fn)) {
-        JS_FreeValue(ctx, array_proto);
-        return -1;
-    }
-
-    ret = JS_DefinePropertyValueStr(ctx, array_proto, "sort", JS_DupValue(ctx, sort_fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-
-    JS_FreeValue(ctx, sort_fn);
-    JS_FreeValue(ctx, array_proto);
-    if (ret < 0)
-        return -1;
-    return 0;
-}
-
-static int js_deterministic_init_host(JSContext *ctx)
-{
-    JSValue host_ns, host_v1;
-    int ret;
-
-    host_ns = JS_NewObjectProto(ctx, JS_NULL);
-    if (JS_IsException(host_ns))
-        return -1;
-
-    host_v1 = JS_NewObjectProto(ctx, JS_NULL);
-    if (JS_IsException(host_v1)) {
-        JS_FreeValue(ctx, host_ns);
-        return -1;
-    }
-
-    ret = JS_DefinePropertyValueStr(ctx, host_ns, "v1", JS_DupValue(ctx, host_v1),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    ret = JS_DefinePropertyValueStr(ctx, ctx->global_obj, "Host", JS_DupValue(ctx, host_ns),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    JS_FreeValue(ctx, host_ns);
-    JS_FreeValue(ctx, host_v1);
-
-    return 0;
-
-fail:
-    JS_FreeValue(ctx, host_ns);
-    JS_FreeValue(ctx, host_v1);
-    return -1;
-}
-
-static int js_deterministic_init_context(JSContext *ctx)
-{
-    if (JS_AddIntrinsicBaseObjects(ctx) ||
-        JS_AddIntrinsicEval(ctx) ||
-        JS_AddIntrinsicJSON(ctx) ||
-        JS_AddIntrinsicMapSet(ctx) ||
-        js_deterministic_disable_eval(ctx) ||
-        js_deterministic_disable_function(ctx) ||
-        js_deterministic_disable_regexp(ctx) ||
-        js_deterministic_disable_proxy(ctx) ||
-        js_deterministic_disable_random(ctx) ||
-        js_deterministic_disable_promise(ctx) ||
-        js_deterministic_disable_typed_arrays(ctx) ||
-        js_deterministic_disable_atomics(ctx) ||
-        js_deterministic_disable_console(ctx) ||
-        js_deterministic_disable_print(ctx) ||
-        js_deterministic_disable_json(ctx) ||
-        js_deterministic_disable_array_sort(ctx) ||
-        js_deterministic_disable_webassembly(ctx) ||
-        js_deterministic_init_host(ctx)) {
-        return -1;
-    }
-    ctx->random_state = 1; /* deterministic seed */
-    ctx->deterministic_mode = TRUE;
-    return 0;
+    memcpy(ctx->abi_manifest_hash, hash, sizeof(ctx->abi_manifest_hash));
+    memcpy(ctx->abi_manifest_hash_hex, hash_hex, sizeof(ctx->abi_manifest_hash_hex));
+    ctx->abi_manifest_bytes = manifest_bytes;
+    ctx->abi_manifest_size = manifest_size;
+    ctx->deterministic_context_blob = context_blob;
+    ctx->deterministic_context_blob_size = context_blob ? context_blob_size : 0;
 }
 
 #ifdef __EMSCRIPTEN__
@@ -2990,168 +2529,7 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
     return 0;
 }
 
-static JSValue JS_ThrowManifestError(JSContext *ctx, const char *code, const char *message)
-{
-    JSValue obj, name, msg, code_val;
-
-    obj = JS_NewError(ctx);
-    if (JS_IsException(obj))
-        return JS_EXCEPTION;
-
-    name = JS_NewString(ctx, "ManifestError");
-    msg = JS_NewString(ctx, message);
-    code_val = JS_NewString(ctx, code);
-    if (JS_IsException(name) || JS_IsException(msg) || JS_IsException(code_val)) {
-        if (!JS_IsException(name))
-            JS_FreeValue(ctx, name);
-        if (!JS_IsException(msg))
-            JS_FreeValue(ctx, msg);
-        if (!JS_IsException(code_val))
-            JS_FreeValue(ctx, code_val);
-        JS_FreeValue(ctx, obj);
-        return JS_EXCEPTION;
-    }
-
-    JS_DefinePropertyValue(ctx, obj, JS_ATOM_name, name,
-                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValue(ctx, obj, JS_ATOM_message, msg,
-                           JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-    JS_DefinePropertyValueStr(ctx, obj, "code", code_val,
-                              JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
-    JS_Throw(ctx, obj);
-    return JS_EXCEPTION;
-}
-
-static int js_hex_nibble(int c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    return -1;
-}
-
-static int js_parse_hash_hex(JSContext *ctx, const char *hex, uint8_t *out, size_t out_size)
-{
-    size_t hex_len, i;
-
-    if (!hex || !out)
-        return -1;
-
-    hex_len = strlen(hex);
-    if (hex_len != out_size * 2) {
-        JS_ThrowTypeError(ctx, "abi manifest hash must be 64 lowercase hex characters");
-        return -1;
-    }
-
-    for(i = 0; i < out_size; i++) {
-        int high = js_hex_nibble(hex[i * 2]);
-        int low = js_hex_nibble(hex[i * 2 + 1]);
-        if (high < 0 || low < 0) {
-            JS_ThrowTypeError(ctx, "abi manifest hash must be 64 lowercase hex characters");
-            return -1;
-        }
-        out[i] = (uint8_t)((high << 4) | low);
-    }
-
-    return 0;
-}
-
-int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions *options)
-{
-    uint8_t computed_hash[32];
-    uint8_t expected_hash[32];
-    uint8_t *manifest_copy = NULL;
-    uint8_t *context_copy = NULL;
-
-    if (!ctx || !options)
-        return -1;
-
-    if (ctx->abi_manifest_bytes) {
-        JS_ThrowTypeError(ctx, "abi manifest is already initialized");
-        return -1;
-    }
-
-    if (!options->manifest_bytes || options->manifest_size == 0) {
-        JS_ThrowTypeError(ctx, "abi manifest is required");
-        return -1;
-    }
-
-    if (options->manifest_size > JS_DETERMINISTIC_MAX_MANIFEST_BYTES) {
-        JS_ThrowTypeError(ctx, "abi manifest exceeds maximum size");
-        return -1;
-    }
-
-    if (!options->manifest_hash_hex) {
-        JS_ThrowTypeError(ctx, "abi manifest hash is required");
-        return -1;
-    }
-
-    if (js_parse_hash_hex(ctx, options->manifest_hash_hex, expected_hash, sizeof(expected_hash)) != 0)
-        return -1;
-
-    if (options->context_blob_size > 0 && !options->context_blob) {
-        JS_ThrowTypeError(ctx, "context blob is required when context_blob_size is set");
-        return -1;
-    }
-
-    js_sha256(options->manifest_bytes, options->manifest_size, computed_hash);
-    if (memcmp(computed_hash, expected_hash, sizeof(expected_hash)) != 0) {
-        JS_ThrowManifestError(ctx, "ABI_MANIFEST_HASH_MISMATCH", "abi manifest hash mismatch");
-        return -1;
-    }
-
-    manifest_copy = js_malloc_rt(ctx->rt, options->manifest_size);
-    if (!manifest_copy) {
-        JS_ThrowOutOfMemory(ctx);
-        return -1;
-    }
-    memcpy(manifest_copy, options->manifest_bytes, options->manifest_size);
-
-    if (options->context_blob && options->context_blob_size > 0) {
-        if (options->context_blob_size > JS_DETERMINISTIC_MAX_CONTEXT_BLOB_BYTES) {
-            js_free_rt(ctx->rt, manifest_copy);
-            JS_ThrowTypeError(ctx, "context blob exceeds maximum size");
-            return -1;
-        }
-
-        context_copy = js_malloc_rt(ctx->rt, options->context_blob_size);
-        if (!context_copy) {
-            js_free_rt(ctx->rt, manifest_copy);
-            JS_ThrowOutOfMemory(ctx);
-            return -1;
-        }
-        memcpy(context_copy, options->context_blob, options->context_blob_size);
-    }
-
-    if (JS_InitHostFromManifest(ctx, manifest_copy, options->manifest_size) != 0) {
-        js_free_rt(ctx->rt, manifest_copy);
-        if (context_copy)
-            js_free_rt(ctx->rt, context_copy);
-        return -1;
-    }
-
-    if (context_copy && options->context_blob_size > 0) {
-        if (JS_InitErgonomicGlobals(ctx, context_copy, options->context_blob_size) != 0) {
-            JS_FreeHostManifest(ctx);
-            js_free_rt(ctx->rt, manifest_copy);
-            js_free_rt(ctx->rt, context_copy);
-            return -1;
-        }
-    }
-
-    memcpy(ctx->abi_manifest_hash, computed_hash, sizeof(computed_hash));
-    js_sha256_to_hex(computed_hash, ctx->abi_manifest_hash_hex);
-    ctx->abi_manifest_bytes = manifest_copy;
-    ctx->abi_manifest_size = options->manifest_size;
-    ctx->deterministic_context_blob = context_copy;
-    ctx->deterministic_context_blob_size = context_copy ? options->context_blob_size : 0;
-    JS_SetGasLimit(ctx, options->gas_limit);
-
-    return 0;
-}
-
-static int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity)
+int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity)
 {
     uint8_t *new_buf;
 
@@ -3169,106 +2547,29 @@ static int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity)
     return 0;
 }
 
-int JS_HostCall(JSContext *ctx,
-                uint32_t fn_id,
-                const uint8_t *req_bytes,
-                size_t req_len,
-                uint32_t max_request_bytes,
-                uint32_t max_response_bytes,
-                JSHostCallResult *out_result)
+uint8_t *js_get_host_response_buffer(JSContext *ctx)
 {
-    JSRuntime *rt;
-    uint32_t resp_len, resp_capacity, req_len32;
-    uint32_t dv_limit;
-    const uint8_t *req_ptr;
+    return ctx->host_call_resp_buf;
+}
 
-    if (!ctx || !out_result)
-        return -1;
+JSHostCallFunc *js_get_host_call_func(JSRuntime *rt)
+{
+    return rt->host_call_func;
+}
 
-    out_result->data = NULL;
-    out_result->length = 0;
+void *js_get_host_call_opaque(JSRuntime *rt)
+{
+    return rt->host_call_opaque;
+}
 
-    rt = ctx->rt;
-    dv_limit = JS_DV_LIMIT_DEFAULTS.max_encoded_bytes;
+BOOL js_runtime_in_host_call(JSRuntime *rt)
+{
+    return rt->in_host_call;
+}
 
-    if (!rt->host_call_func) {
-        JS_ThrowTypeError(ctx, "host_call dispatcher is not configured");
-        return -1;
-    }
-
-    if (fn_id == 0) {
-        JS_ThrowTypeError(ctx, "host_call fn_id must be >= 1");
-        return -1;
-    }
-
-    if (max_request_bytes == 0) {
-        JS_ThrowTypeError(ctx, "host_call max_request_bytes must be > 0");
-        return -1;
-    }
-
-    if (max_request_bytes > dv_limit) {
-        JS_ThrowTypeError(ctx, "host_call max_request_bytes exceeds DV limit");
-        return -1;
-    }
-
-    if (max_response_bytes == 0) {
-        JS_ThrowTypeError(ctx, "host_call max_response_bytes must be > 0");
-        return -1;
-    }
-
-    if (max_response_bytes > dv_limit) {
-        JS_ThrowTypeError(ctx, "host_call max_response_bytes exceeds DV limit");
-        return -1;
-    }
-
-    if (req_len > (size_t)max_request_bytes) {
-        JS_ThrowTypeError(ctx, "host_call request exceeds max_request_bytes");
-        return -1;
-    }
-
-    if (req_len > (size_t)dv_limit) {
-        JS_ThrowTypeError(ctx, "host_call request exceeds DV limit");
-        return -1;
-    }
-
-    if (req_len > UINT32_MAX) {
-        JS_ThrowTypeError(ctx, "host_call request length overflow");
-        return -1;
-    }
-
-    if (req_len > 0 && !req_bytes) {
-        JS_ThrowTypeError(ctx, "host_call request pointer is null");
-        return -1;
-    }
-
-    if (rt->in_host_call) {
-        JS_ThrowTypeError(ctx, "host_call is already in progress");
-        return -1;
-    }
-
-    resp_capacity = max_response_bytes;
-    if (js_reserve_host_response_buffer(ctx, resp_capacity))
-        return -1;
-
-    rt->in_host_call = TRUE;
-    req_len32 = (uint32_t)req_len;
-    req_ptr = req_bytes ? req_bytes : NULL;
-    resp_len = rt->host_call_func(ctx, fn_id, req_ptr, req_len32,
-                                  ctx->host_call_resp_buf, resp_capacity,
-                                  rt->host_call_opaque);
-    rt->in_host_call = FALSE;
-
-    if (JS_HasException(ctx))
-        return -1;
-
-    if (resp_len == JS_HOST_CALL_TRANSPORT_ERROR || resp_len > resp_capacity) {
-        JS_ThrowHostTransportError(ctx);
-        return -1;
-    }
-
-    out_result->data = ctx->host_call_resp_buf;
-    out_result->length = resp_len;
-    return 0;
+void js_runtime_set_in_host_call(JSRuntime *rt, BOOL in_call)
+{
+    rt->in_host_call = in_call ? TRUE : FALSE;
 }
 
 void *JS_GetContextOpaque(JSContext *ctx)
