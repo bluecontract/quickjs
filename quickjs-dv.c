@@ -307,6 +307,31 @@ static int dv_encode_value(JSContext *ctx,
                            uint32_t depth,
                            JSDvBuilder *builder);
 
+static const char *dv_tag_name(int tag)
+{
+    switch (tag) {
+        case JS_TAG_UNDEFINED:
+            return "undefined";
+        case JS_TAG_BIG_INT:
+        case JS_TAG_SHORT_BIG_INT:
+            return "bigint";
+        case JS_TAG_SYMBOL:
+            return "symbol";
+        case JS_TAG_FUNCTION_BYTECODE:
+            return "function";
+        case JS_TAG_MODULE:
+            return "module";
+        case JS_TAG_UNINITIALIZED:
+            return "uninitialized";
+        case JS_TAG_EXCEPTION:
+            return "exception";
+        case JS_TAG_CATCH_OFFSET:
+            return "catch_offset";
+        default:
+            return NULL;
+    }
+}
+
 static int dv_encode_array(JSContext *ctx,
                            JSValueConst value,
                            const JSDvLimits *limits,
@@ -598,7 +623,12 @@ static int dv_encode_value(JSContext *ctx,
             return dv_encode_object(ctx, value, limits, depth, builder);
         }
         default:
-            return dv_throw(ctx, "unsupported DV type: %d", tag);
+            {
+                const char *name = dv_tag_name(tag);
+                if (name)
+                    return dv_throw(ctx, "unsupported DV type: %s", name);
+                return dv_throw(ctx, "unsupported DV type: %d", tag);
+            }
     }
 }
 
