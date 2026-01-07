@@ -2503,6 +2503,24 @@ static JSValue js_document_wrapper(JSContext *ctx,
     return JS_Call(ctx, func_data[0], JS_UNDEFINED, argc, argv);
 }
 
+static JSValue js_emit_wrapper(JSContext *ctx,
+                               JSValueConst this_val,
+                               int argc,
+                               JSValueConst *argv,
+                               int magic,
+                               JSValue *func_data)
+{
+    (void)this_val;
+    (void)magic;
+
+    if (!func_data || !JS_IsFunction(ctx, func_data[0])) {
+        JS_ThrowTypeError(ctx, "Host.v1.emit binding is missing");
+        return JS_EXCEPTION;
+    }
+
+    return JS_Call(ctx, func_data[0], JS_UNDEFINED, argc, argv);
+}
+
 static JSValue js_canon_unwrap(JSContext *ctx,
                                JSValueConst this_val,
                                int argc,
@@ -2727,6 +2745,8 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     JSValue document_get_canonical = JS_UNDEFINED;
     JSValue document_fn = JS_UNDEFINED;
     JSValue document_canonical_fn = JS_UNDEFINED;
+    JSValue emit_call = JS_UNDEFINED;
+    JSValue emit_fn = JS_UNDEFINED;
     JSValue canon_obj = JS_UNDEFINED;
     JSValue canon_unwrap_fn = JS_UNDEFINED;
     JSValue canon_at_fn = JS_UNDEFINED;
@@ -2734,6 +2754,7 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     JSValue event_canonical_val = JS_NULL;
     JSValue steps_val = JS_NULL;
     JSValueConst doc_funcs[1];
+    JSValueConst emit_funcs[1];
     int ret = -1;
 
     if (!ctx)
@@ -2806,6 +2827,33 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
         goto done;
     if (JS_PreventExtensions(ctx, document_canonical_fn) < 0)
         goto done;
+
+    emit_call = JS_GetPropertyStr(ctx, host_v1, "emit");
+    if (JS_IsException(emit_call))
+        goto done;
+
+    if (!JS_IsUndefined(emit_call)) {
+        if (!JS_IsFunction(ctx, emit_call)) {
+            JS_ThrowTypeError(ctx, "Host.v1.emit binding is missing");
+            goto done;
+        }
+
+        emit_funcs[0] = JS_DupValue(ctx, emit_call);
+        emit_fn = JS_NewCFunctionData(ctx, js_emit_wrapper, 1, 0, 1, emit_funcs);
+        JS_FreeValue(ctx, (JSValue)emit_funcs[0]);
+        if (JS_IsException(emit_fn))
+            goto done;
+
+        if (JS_DefinePropertyValueStr(ctx,
+                                      global,
+                                      "emit",
+                                      JS_DupValue(ctx, emit_fn),
+                                      JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+            goto done;
+
+        if (JS_PreventExtensions(ctx, emit_fn) < 0)
+            goto done;
+    }
 
     canon_obj = JS_NewObjectProto(ctx, JS_NULL);
     if (JS_IsException(canon_obj))
@@ -2887,6 +2935,10 @@ done:
         JS_FreeValue(ctx, document_fn);
     if (!JS_IsUndefined(document_canonical_fn))
         JS_FreeValue(ctx, document_canonical_fn);
+    if (!JS_IsUndefined(emit_call))
+        JS_FreeValue(ctx, emit_call);
+    if (!JS_IsUndefined(emit_fn))
+        JS_FreeValue(ctx, emit_fn);
     if (!JS_IsUndefined(canon_obj))
         JS_FreeValue(ctx, canon_obj);
     if (!JS_IsUndefined(canon_unwrap_fn))
