@@ -2289,165 +2289,160 @@ static JSValue js_canon_at(JSContext *ctx,
     JSValue canonical = JS_UNDEFINED;
     JSValue current = JS_UNDEFINED;
     JSValue ret = JS_UNDEFINED;
-    uint32_t path_len = 0;
+    const char *pointer = NULL;
+    size_t pointer_len = 0;
+    char *token = NULL;
     BOOL missing = FALSE;
 
     (void)this_val;
 
     if (argc < 2) {
-        JS_ThrowTypeError(ctx, "canon.at expects a value and a path array");
+        JS_ThrowTypeError(ctx, "canon.at expects a value and a JSON Pointer string");
         return JS_EXCEPTION;
     }
 
-    if (!JS_IsArray(ctx, argv[1])) {
-        JS_ThrowTypeError(ctx, "canon.at path must be an array");
+    if (JS_IsArray(ctx, argv[1])) {
+        JS_ThrowTypeError(ctx, "canon.at path must be a JSON Pointer string (array paths are no longer supported)");
+        return JS_EXCEPTION;
+    }
+
+    if (!JS_IsString(argv[1])) {
+        JS_ThrowTypeError(ctx, "canon.at path must be a JSON Pointer string");
         return JS_EXCEPTION;
     }
 
     if (js_canon_clone_and_freeze(ctx, argv[0], &canonical))
         return JS_EXCEPTION;
 
-    {
-        JSValue len_val = JS_GetPropertyStr(ctx, argv[1], "length");
-        if (JS_IsException(len_val)) {
-            JS_FreeValue(ctx, canonical);
-            return JS_EXCEPTION;
-        }
-        if (JS_ToUint32(ctx, &path_len, len_val)) {
-            JS_FreeValue(ctx, len_val);
-            JS_FreeValue(ctx, canonical);
-            return JS_EXCEPTION;
-        }
-        JS_FreeValue(ctx, len_val);
+    pointer = JS_ToCStringLen2(ctx, &pointer_len, argv[1], 0);
+    if (!pointer) {
+        JS_FreeValue(ctx, canonical);
+        return JS_EXCEPTION;
+    }
+
+    if (pointer_len == 0) {
+        ret = JS_DupValue(ctx, canonical);
+        goto done;
+    }
+
+    if (pointer[0] == '#') {
+        JS_ThrowTypeError(ctx, "canon.at JSON Pointer fragment form is not supported");
+        ret = JS_EXCEPTION;
+        goto done;
+    }
+
+    if (pointer[0] != '/') {
+        JS_ThrowTypeError(ctx, "canon.at path must be a JSON Pointer string");
+        ret = JS_EXCEPTION;
+        goto done;
+    }
+
+    token = js_malloc(ctx, pointer_len + 1);
+    if (!token) {
+        ret = JS_EXCEPTION;
+        goto done;
     }
 
     current = JS_DupValue(ctx, canonical);
 
-    for (uint32_t i = 0; i < path_len; i++) {
-        JSValue segment = JS_GetPropertyUint32(ctx, argv[1], i);
-
-        if (JS_IsException(segment)) {
-            JS_FreeValue(ctx, current);
-            JS_FreeValue(ctx, canonical);
-            return JS_EXCEPTION;
-        }
+    for (size_t pos = 1; pos <= pointer_len;) {
+        size_t token_len = 0;
+        JSValue next = JS_UNDEFINED;
+        BOOL is_array = FALSE;
+        BOOL is_index = FALSE;
+        uint64_t index = 0;
 
         if (!JS_IsObject(current)) {
-            JS_FreeValue(ctx, segment);
             missing = TRUE;
             break;
         }
 
-        if (JS_IsString(segment)) {
-            size_t utf8_len = 0;
-            const char *prop = JS_ToCStringLen2(ctx, &utf8_len, segment, 0);
-            JSValue next = JS_UNDEFINED;
+        while (pos < pointer_len && pointer[pos] != '/') {
+            char ch = pointer[pos];
 
-            if (!prop) {
-                JS_FreeValue(ctx, segment);
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                return JS_EXCEPTION;
-            }
-
-            if (utf8_len > JS_DV_LIMIT_DEFAULTS.max_string_bytes) {
-                JS_FreeCString(ctx, prop);
-                JS_FreeValue(ctx, segment);
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                JS_ThrowTypeError(ctx, "canon.at path segment exceeds string limit");
-                return JS_EXCEPTION;
-            }
-
-            next = JS_GetPropertyStr(ctx, current, prop);
-            JS_FreeCString(ctx, prop);
-            JS_FreeValue(ctx, segment);
-
-            if (JS_IsException(next)) {
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                return JS_EXCEPTION;
-            }
-
-            if (JS_IsUndefined(next)) {
-                JS_FreeValue(ctx, next);
-                missing = TRUE;
-                break;
-            }
-
-            JS_FreeValue(ctx, current);
-            current = next;
-        } else {
-            BOOL is_number = JS_IsNumber(segment);
-            BOOL is_bigint = JS_IsBigInt(ctx, segment);
-            double idx_d = 0;
-            int64_t index = 0;
-            JSValue next = JS_UNDEFINED;
-
-            if (!is_number && !is_bigint) {
-                JS_FreeValue(ctx, segment);
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
-                return JS_EXCEPTION;
-            }
-
-            if (is_number) {
-                if (JS_ToFloat64(ctx, &idx_d, segment)) {
-                    JS_FreeValue(ctx, segment);
-                    JS_FreeValue(ctx, current);
-                    JS_FreeValue(ctx, canonical);
-                    return JS_EXCEPTION;
+            if (ch == '~') {
+                if (pos + 1 >= pointer_len) {
+                    JS_ThrowTypeError(ctx, "canon.at JSON Pointer contains invalid escape sequence");
+                    ret = JS_EXCEPTION;
+                    goto done;
                 }
-
-                if (!isfinite(idx_d) || floor(idx_d) != idx_d || (idx_d == 0.0 && signbit(idx_d))) {
-                    JS_FreeValue(ctx, segment);
-                    JS_FreeValue(ctx, current);
-                    JS_FreeValue(ctx, canonical);
-                    JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
-                    return JS_EXCEPTION;
+                char esc = pointer[pos + 1];
+                if (esc == '0') {
+                    token[token_len++] = '~';
+                } else if (esc == '1') {
+                    token[token_len++] = '/';
+                } else {
+                    JS_ThrowTypeError(ctx, "canon.at JSON Pointer contains invalid escape sequence");
+                    ret = JS_EXCEPTION;
+                    goto done;
                 }
+                pos += 2;
+                continue;
+            }
 
-                index = (int64_t)idx_d;
-            } else {
-                if (JS_ToInt64Ext(ctx, &index, segment)) {
-                    JS_FreeValue(ctx, segment);
-                    JS_FreeValue(ctx, current);
-                    JS_FreeValue(ctx, canonical);
-                    JS_ThrowTypeError(ctx, "canon.at path elements must be strings or integers");
-                    return JS_EXCEPTION;
+            token[token_len++] = ch;
+            pos++;
+        }
+
+        token[token_len] = '\0';
+        is_array = JS_IsArray(ctx, current);
+
+        if (is_array) {
+            if (token_len == 1 && token[0] == '-') {
+                JS_ThrowTypeError(ctx, "canon.at path index '-' is not allowed");
+                ret = JS_EXCEPTION;
+                goto done;
+            }
+
+            if (token_len > 0 && token[0] >= '0' && token[0] <= '9' &&
+                !(token_len > 1 && token[0] == '0')) {
+                is_index = TRUE;
+                for (size_t i = 0; i < token_len; i++) {
+                    char digit = token[i];
+                    if (digit < '0' || digit > '9') {
+                        is_index = FALSE;
+                        index = 0;
+                        break;
+                    }
+                    index = (index * 10) + (uint64_t)(digit - '0');
+                    if (index >= JS_DV_LIMIT_DEFAULTS.max_array_length) {
+                        JS_ThrowTypeError(ctx, "canon.at path index is out of range");
+                        ret = JS_EXCEPTION;
+                        goto done;
+                    }
                 }
             }
+        }
 
-            JS_FreeValue(ctx, segment);
-
-            if (index < 0 || (uint64_t)index >= JS_DV_LIMIT_DEFAULTS.max_array_length) {
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                JS_ThrowTypeError(ctx, "canon.at path index is out of range");
-                return JS_EXCEPTION;
-            }
-
-            if (!JS_IsArray(ctx, current)) {
-                missing = TRUE;
-                break;
-            }
-
+        if (is_array && is_index) {
             next = JS_GetPropertyUint32(ctx, current, (uint32_t)index);
-            if (JS_IsException(next)) {
-                JS_FreeValue(ctx, current);
-                JS_FreeValue(ctx, canonical);
-                return JS_EXCEPTION;
+        } else {
+            if (token_len > JS_DV_LIMIT_DEFAULTS.max_string_bytes) {
+                JS_ThrowTypeError(ctx, "canon.at path segment exceeds string limit");
+                ret = JS_EXCEPTION;
+                goto done;
             }
+            next = JS_GetPropertyStr(ctx, current, token);
+        }
 
-            if (JS_IsUndefined(next)) {
-                JS_FreeValue(ctx, next);
-                missing = TRUE;
-                break;
-            }
+        if (JS_IsException(next)) {
+            ret = JS_EXCEPTION;
+            goto done;
+        }
 
-            JS_FreeValue(ctx, current);
-            current = next;
+        if (JS_IsUndefined(next)) {
+            JS_FreeValue(ctx, next);
+            missing = TRUE;
+            break;
+        }
+
+        JS_FreeValue(ctx, current);
+        current = next;
+
+        if (pos < pointer_len && pointer[pos] == '/') {
+            pos++;
+        } else if (pos == pointer_len) {
+            pos++;
         }
     }
 
@@ -2460,6 +2455,11 @@ static JSValue js_canon_at(JSContext *ctx,
         current = JS_UNDEFINED;
     }
 
+done:
+    if (token)
+        js_free(ctx, token);
+    if (pointer)
+        JS_FreeCString(ctx, pointer);
     JS_FreeValue(ctx, canonical);
     if (!JS_IsUndefined(current))
         JS_FreeValue(ctx, current);
