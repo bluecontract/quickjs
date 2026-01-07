@@ -2127,137 +2127,6 @@ done:
     return ret;
 }
 
-static int js_canon_clone_depth(JSContext *ctx,
-                                JSValueConst input,
-                                JSValueConst canonical,
-                                uint32_t depth,
-                                JSValue *out)
-{
-    JSValue clone = JS_UNDEFINED;
-    JSPropertyEnum *props = NULL;
-    uint32_t props_len = 0;
-    int is_array = 0;
-    int ret = -1;
-
-    if (!out)
-        return -1;
-
-    if (!JS_IsObject(canonical)) {
-        *out = JS_DupValue(ctx, canonical);
-        return 0;
-    }
-
-    is_array = JS_IsArray(ctx, canonical);
-    if (is_array < 0)
-        return -1;
-
-    if (is_array) {
-        JSValue length_val = JS_UNDEFINED;
-        uint64_t length64 = 0;
-
-        clone = JS_NewArray(ctx);
-        if (JS_IsException(clone))
-            return -1;
-
-        length_val = JS_GetPropertyStr(ctx, canonical, "length");
-        if (JS_IsException(length_val))
-            goto done;
-
-        if (JS_ToIndex(ctx, &length64, length_val) < 0) {
-            JS_FreeValue(ctx, length_val);
-            goto done;
-        }
-
-        JS_FreeValue(ctx, length_val);
-        length_val = JS_UNDEFINED;
-
-        for (uint32_t i = 0; i < (uint32_t)length64; i++) {
-            JSValue input_val = JS_GetPropertyUint32(ctx, input, i);
-            JSValue next = JS_UNDEFINED;
-
-            if (JS_IsException(input_val))
-                goto done;
-
-            if (depth == 0) {
-                next = input_val;
-            } else {
-                JSValue canonical_val = JS_GetPropertyUint32(ctx, canonical, i);
-                if (JS_IsException(canonical_val)) {
-                    JS_FreeValue(ctx, input_val);
-                    goto done;
-                }
-
-                if (js_canon_clone_depth(ctx, input_val, canonical_val, depth - 1, &next)) {
-                    JS_FreeValue(ctx, input_val);
-                    JS_FreeValue(ctx, canonical_val);
-                    goto done;
-                }
-
-                JS_FreeValue(ctx, input_val);
-                JS_FreeValue(ctx, canonical_val);
-            }
-
-            if (JS_SetPropertyUint32(ctx, clone, i, next) < 0) {
-                goto done;
-            }
-        }
-
-        *out = clone;
-        return 0;
-    }
-
-    clone = JS_NewObjectProto(ctx, JS_NULL);
-    if (JS_IsException(clone))
-        return -1;
-
-    if (JS_GetOwnPropertyNames(ctx, &props, &props_len, canonical,
-                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
-        goto done;
-
-    for (uint32_t i = 0; i < props_len; i++) {
-        JSAtom atom = props[i].atom;
-        JSValue input_val = JS_GetProperty(ctx, input, atom);
-        JSValue next = JS_UNDEFINED;
-
-        if (JS_IsException(input_val))
-            goto done;
-
-        if (depth == 0) {
-            next = input_val;
-        } else {
-            JSValue canonical_val = JS_GetProperty(ctx, canonical, atom);
-            if (JS_IsException(canonical_val)) {
-                JS_FreeValue(ctx, input_val);
-                goto done;
-            }
-
-            if (js_canon_clone_depth(ctx, input_val, canonical_val, depth - 1, &next)) {
-                JS_FreeValue(ctx, input_val);
-                JS_FreeValue(ctx, canonical_val);
-                goto done;
-            }
-
-            JS_FreeValue(ctx, input_val);
-            JS_FreeValue(ctx, canonical_val);
-        }
-
-        if (JS_DefinePropertyValue(ctx, clone, atom, next, JS_PROP_C_W_E) < 0) {
-            goto done;
-        }
-    }
-
-    *out = clone;
-    clone = JS_UNDEFINED;
-    ret = 0;
-
-done:
-    if (props)
-        JS_FreePropertyEnum(ctx, props, props_len);
-    if (!JS_IsUndefined(clone))
-        JS_FreeValue(ctx, clone);
-    return ret;
-}
-
 static int js_canon_clone_and_freeze(JSContext *ctx, JSValueConst input, JSValue *out)
 {
     JSDvBuffer buf = {0};
@@ -2287,15 +2156,204 @@ static int js_canon_clone_and_freeze(JSContext *ctx, JSValueConst input, JSValue
     return 0;
 }
 
-static int js_canon_clone_and_freeze_depth(JSContext *ctx,
-                                           JSValueConst input,
-                                           uint32_t depth,
-                                           JSValue *out)
+typedef struct {
+    JSAtom value_atom;
+    JSAtom items_atom;
+} CanonUnwrapAtoms;
+
+static int js_has_own_property(JSContext *ctx, JSValueConst obj, JSAtom prop)
+{
+    return JS_GetOwnProperty(ctx, NULL, obj, prop);
+}
+
+static int js_canon_unwrap_value(JSContext *ctx,
+                                 JSValueConst value,
+                                 BOOL deep,
+                                 const CanonUnwrapAtoms *atoms,
+                                 JSValue *out);
+
+static int js_canon_unwrap_array(JSContext *ctx,
+                                 JSValueConst value,
+                                 BOOL deep,
+                                 const CanonUnwrapAtoms *atoms,
+                                 JSValue *out)
+{
+    JSValue clone = JS_UNDEFINED;
+    JSValue length_val = JS_UNDEFINED;
+    uint64_t length64 = 0;
+
+    if (!out)
+        return -1;
+
+    clone = JS_NewArray(ctx);
+    if (JS_IsException(clone))
+        return -1;
+
+    length_val = JS_GetPropertyStr(ctx, value, "length");
+    if (JS_IsException(length_val))
+        goto done;
+
+    if (JS_ToIndex(ctx, &length64, length_val) < 0) {
+        JS_FreeValue(ctx, length_val);
+        goto done;
+    }
+
+    JS_FreeValue(ctx, length_val);
+    length_val = JS_UNDEFINED;
+
+    for (uint32_t i = 0; i < (uint32_t)length64; i++) {
+        JSValue element = JS_GetPropertyUint32(ctx, value, i);
+        JSValue next = JS_UNDEFINED;
+
+        if (JS_IsException(element))
+            goto done;
+
+        if (!deep) {
+            next = element;
+        } else {
+            if (js_canon_unwrap_value(ctx, element, TRUE, atoms, &next)) {
+                JS_FreeValue(ctx, element);
+                goto done;
+            }
+            JS_FreeValue(ctx, element);
+        }
+
+        if (JS_SetPropertyUint32(ctx, clone, i, next) < 0) {
+            JS_FreeValue(ctx, next);
+            goto done;
+        }
+    }
+
+    *out = clone;
+    return 0;
+
+done:
+    if (!JS_IsUndefined(clone))
+        JS_FreeValue(ctx, clone);
+    return -1;
+}
+
+static int js_canon_unwrap_value(JSContext *ctx,
+                                 JSValueConst value,
+                                 BOOL deep,
+                                 const CanonUnwrapAtoms *atoms,
+                                 JSValue *out)
+{
+    JSValue items = JS_UNDEFINED;
+    JSValue clone = JS_UNDEFINED;
+    JSPropertyEnum *props = NULL;
+    uint32_t props_len = 0;
+    int is_array = 0;
+    int ret = -1;
+
+    if (!out)
+        return -1;
+
+    is_array = JS_IsArray(ctx, value);
+    if (is_array < 0)
+        return -1;
+
+    if (is_array)
+        return js_canon_unwrap_array(ctx, value, deep, atoms, out);
+
+    if (!JS_IsObject(value)) {
+        *out = JS_DupValue(ctx, value);
+        return 0;
+    }
+
+    int has_value = js_has_own_property(ctx, value, atoms->value_atom);
+    if (has_value < 0)
+        return -1;
+
+    if (has_value) {
+        JSValue nested = JS_GetProperty(ctx, value, atoms->value_atom);
+        if (JS_IsException(nested))
+            return -1;
+
+        if (!deep) {
+            *out = nested;
+            return 0;
+        }
+
+        ret = js_canon_unwrap_value(ctx, nested, TRUE, atoms, out);
+        JS_FreeValue(ctx, nested);
+        return ret;
+    }
+
+    items = JS_GetProperty(ctx, value, atoms->items_atom);
+    if (JS_IsException(items))
+        return -1;
+
+    is_array = JS_IsArray(ctx, items);
+    if (is_array < 0) {
+        JS_FreeValue(ctx, items);
+        return -1;
+    }
+
+    if (is_array) {
+        ret = js_canon_unwrap_array(ctx, items, deep, atoms, out);
+        JS_FreeValue(ctx, items);
+        return ret;
+    }
+
+    JS_FreeValue(ctx, items);
+    items = JS_UNDEFINED;
+
+    clone = JS_NewObject(ctx);
+    if (JS_IsException(clone))
+        return -1;
+
+    if (JS_GetOwnPropertyNames(ctx, &props, &props_len, value,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        goto done;
+
+    for (uint32_t i = 0; i < props_len; i++) {
+        JSAtom atom = props[i].atom;
+        JSValue child = JS_GetProperty(ctx, value, atom);
+        JSValue next = JS_UNDEFINED;
+
+        if (JS_IsException(child))
+            goto done;
+
+        if (!deep) {
+            next = child;
+        } else {
+            if (js_canon_unwrap_value(ctx, child, TRUE, atoms, &next)) {
+                JS_FreeValue(ctx, child);
+                goto done;
+            }
+            JS_FreeValue(ctx, child);
+        }
+
+        if (JS_DefinePropertyValue(ctx, clone, atom, next, JS_PROP_C_W_E) < 0) {
+            JS_FreeValue(ctx, next);
+            goto done;
+        }
+    }
+
+    *out = clone;
+    clone = JS_UNDEFINED;
+    ret = 0;
+
+done:
+    if (props)
+        JS_FreePropertyEnum(ctx, props, props_len);
+    if (!JS_IsUndefined(clone))
+        JS_FreeValue(ctx, clone);
+    return ret;
+}
+
+static int js_canon_unwrap_and_freeze(JSContext *ctx,
+                                      JSValueConst input,
+                                      BOOL deep,
+                                      JSValue *out)
 {
     JSDvBuffer buf = {0};
     JSDvLimits limits = JS_DV_LIMIT_DEFAULTS;
     JSValue decoded = JS_UNDEFINED;
-    JSValue clone = JS_UNDEFINED;
+    JSValue unwrapped = JS_UNDEFINED;
+    CanonUnwrapAtoms atoms = {JS_ATOM_NULL, JS_ATOM_NULL};
+    int ret = -1;
 
     if (!out)
         return -1;
@@ -2311,20 +2369,31 @@ static int js_canon_clone_and_freeze_depth(JSContext *ctx,
     if (JS_IsException(decoded))
         return -1;
 
-    if (js_canon_clone_depth(ctx, input, decoded, depth, &clone)) {
+    atoms.value_atom = JS_NewAtom(ctx, "value");
+    atoms.items_atom = JS_NewAtom(ctx, "items");
+    if (atoms.value_atom == JS_ATOM_NULL || atoms.items_atom == JS_ATOM_NULL)
+        goto done;
+
+    if (js_canon_unwrap_value(ctx, decoded, deep, &atoms, &unwrapped))
+        goto done;
+
+    if (js_freeze_value(ctx, unwrapped, deep ? UINT32_MAX : 0))
+        goto done;
+
+    *out = unwrapped;
+    unwrapped = JS_UNDEFINED;
+    ret = 0;
+
+done:
+    if (atoms.value_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, atoms.value_atom);
+    if (atoms.items_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, atoms.items_atom);
+    if (!JS_IsUndefined(decoded))
         JS_FreeValue(ctx, decoded);
-        return -1;
-    }
-
-    JS_FreeValue(ctx, decoded);
-
-    if (js_freeze_value(ctx, clone, depth)) {
-        JS_FreeValue(ctx, clone);
-        return -1;
-    }
-
-    *out = clone;
-    return 0;
+    if (!JS_IsUndefined(unwrapped))
+        JS_FreeValue(ctx, unwrapped);
+    return ret;
 }
 
 static int js_context_copy_and_freeze(JSContext *ctx,
@@ -2457,13 +2526,8 @@ static JSValue js_canon_unwrap(JSContext *ctx,
         deep = JS_ToBool(ctx, argv[1]);
     }
 
-    if (deep) {
-        if (js_canon_clone_and_freeze(ctx, argv[0], &clone))
-            return JS_EXCEPTION;
-    } else {
-        if (js_canon_clone_and_freeze_depth(ctx, argv[0], 0, &clone))
-            return JS_EXCEPTION;
-    }
+    if (js_canon_unwrap_and_freeze(ctx, argv[0], deep, &clone))
+        return JS_EXCEPTION;
 
     return clone;
 }
