@@ -3295,20 +3295,27 @@ static int js_decode_context_blob(JSContext *ctx,
                                   size_t context_blob_size,
                                   JSValue *out_event,
                                   JSValue *out_event_canonical,
-                                  JSValue *out_steps)
+                                  JSValue *out_steps,
+                                  JSValue *out_current_contract,
+                                  JSValue *out_current_contract_canonical)
 {
     JSValue decoded = JS_UNDEFINED;
     JSAtom event_atom = JS_ATOM_NULL;
     JSAtom event_canonical_atom = JS_ATOM_NULL;
     JSAtom steps_atom = JS_ATOM_NULL;
+    JSAtom current_contract_atom = JS_ATOM_NULL;
+    JSAtom current_contract_canonical_atom = JS_ATOM_NULL;
     int ret = -1;
 
-    if (!out_event || !out_event_canonical || !out_steps)
+    if (!out_event || !out_event_canonical || !out_steps ||
+        !out_current_contract || !out_current_contract_canonical)
         return -1;
 
     *out_event = JS_NULL;
     *out_event_canonical = JS_NULL;
     *out_steps = JS_NULL;
+    *out_current_contract = JS_NULL;
+    *out_current_contract_canonical = JS_NULL;
 
     if (!context_blob || context_blob_size == 0)
         return 0;
@@ -3326,7 +3333,11 @@ static int js_decode_context_blob(JSContext *ctx,
     event_atom = JS_NewAtom(ctx, "event");
     event_canonical_atom = JS_NewAtom(ctx, "eventCanonical");
     steps_atom = JS_NewAtom(ctx, "steps");
-    if (event_atom == JS_ATOM_NULL || event_canonical_atom == JS_ATOM_NULL || steps_atom == JS_ATOM_NULL)
+    current_contract_atom = JS_NewAtom(ctx, "currentContract");
+    current_contract_canonical_atom = JS_NewAtom(ctx, "currentContractCanonical");
+    if (event_atom == JS_ATOM_NULL || event_canonical_atom == JS_ATOM_NULL ||
+        steps_atom == JS_ATOM_NULL || current_contract_atom == JS_ATOM_NULL ||
+        current_contract_canonical_atom == JS_ATOM_NULL)
         goto done;
 
     if (js_context_copy_and_freeze(ctx, decoded, event_atom, out_event))
@@ -3334,6 +3345,10 @@ static int js_decode_context_blob(JSContext *ctx,
     if (js_context_copy_and_freeze(ctx, decoded, event_canonical_atom, out_event_canonical))
         goto done;
     if (js_context_copy_and_freeze(ctx, decoded, steps_atom, out_steps))
+        goto done;
+    if (js_context_copy_and_freeze(ctx, decoded, current_contract_atom, out_current_contract))
+        goto done;
+    if (js_context_copy_and_freeze(ctx, decoded, current_contract_canonical_atom, out_current_contract_canonical))
         goto done;
 
     ret = 0;
@@ -3345,6 +3360,10 @@ done:
         JS_FreeAtom(ctx, event_canonical_atom);
     if (steps_atom != JS_ATOM_NULL)
         JS_FreeAtom(ctx, steps_atom);
+    if (current_contract_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, current_contract_atom);
+    if (current_contract_canonical_atom != JS_ATOM_NULL)
+        JS_FreeAtom(ctx, current_contract_canonical_atom);
     if (!JS_IsUndefined(decoded))
         JS_FreeValue(ctx, decoded);
     return ret;
@@ -3618,6 +3637,8 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     JSValue event_val = JS_NULL;
     JSValue event_canonical_val = JS_NULL;
     JSValue steps_val = JS_NULL;
+    JSValue current_contract_val = JS_NULL;
+    JSValue current_contract_canonical_val = JS_NULL;
     JSValueConst doc_funcs[1];
     JSValueConst emit_funcs[1];
     int ret = -1;
@@ -3630,7 +3651,9 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
         return -1;
     }
 
-    if (js_decode_context_blob(ctx, context_blob, context_blob_size, &event_val, &event_canonical_val, &steps_val))
+    if (js_decode_context_blob(ctx, context_blob, context_blob_size,
+                               &event_val, &event_canonical_val, &steps_val,
+                               &current_contract_val, &current_contract_canonical_val))
         goto done;
 
     global = JS_GetGlobalObject(ctx);
@@ -3781,6 +3804,20 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
                                   JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
         goto done;
 
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "currentContract",
+                                  JS_DupValue(ctx, current_contract_val),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
+    if (JS_DefinePropertyValueStr(ctx,
+                                  global,
+                                  "currentContractCanonical",
+                                  JS_DupValue(ctx, current_contract_canonical_val),
+                                  JS_PROP_HAS_VALUE | JS_PROP_HAS_WRITABLE | JS_PROP_HAS_CONFIGURABLE) < 0)
+        goto done;
+
     ret = 0;
 
 done:
@@ -3816,5 +3853,9 @@ done:
         JS_FreeValue(ctx, event_canonical_val);
     if (!JS_IsUndefined(steps_val))
         JS_FreeValue(ctx, steps_val);
+    if (!JS_IsUndefined(current_contract_val))
+        JS_FreeValue(ctx, current_contract_val);
+    if (!JS_IsUndefined(current_contract_canonical_val))
+        JS_FreeValue(ctx, current_contract_canonical_val);
     return ret;
 }
