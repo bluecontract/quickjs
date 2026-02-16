@@ -1110,7 +1110,7 @@ void JS_FreeDVBuffer(JSContext *ctx, JSDvBuffer *buffer) {
 
 const JSDvLimits JS_DV_LIMIT_DEFAULTS = {
     .max_depth = 64,
-    .max_encoded_bytes = 1048576,
+    .max_encoded_bytes = 5242880,
     .max_string_bytes = 262144,
     .max_array_length = 65535,
     .max_map_length = 65535,
