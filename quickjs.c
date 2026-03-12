@@ -1142,6 +1142,19 @@ struct JSGasTraceData {
     uint64_t allocation_count;
     uint64_t allocation_bytes;
     uint64_t allocation_gas;
+    uint64_t json_parse_count;
+    uint64_t json_parse_gas;
+    uint64_t json_parse_input_bytes;
+    uint64_t json_parse_value_count;
+    uint64_t json_parse_object_entry_count;
+    uint64_t json_parse_array_element_count;
+    uint64_t json_stringify_count;
+    uint64_t json_stringify_gas;
+    uint64_t json_stringify_output_bytes;
+    uint64_t json_stringify_value_count;
+    uint64_t json_stringify_object_entry_count;
+    uint64_t json_stringify_array_element_count;
+    uint64_t json_stringify_sort_comparison_count;
 };
 
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
@@ -1200,6 +1213,50 @@ static void js_gas_trace_record_allocation(JSContext *ctx, size_t size, uint64_t
     trace->allocation_count++;
     trace->allocation_bytes += size;
     trace->allocation_gas += gas_cost;
+}
+
+static void js_gas_trace_record_json_parse(JSContext *ctx,
+                                           uint64_t gas_cost,
+                                           BOOL count_call,
+                                           uint64_t input_bytes,
+                                           uint64_t value_count,
+                                           uint64_t object_entry_count,
+                                           uint64_t array_element_count)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    if (count_call)
+        trace->json_parse_count++;
+    trace->json_parse_gas += gas_cost;
+    trace->json_parse_input_bytes += input_bytes;
+    trace->json_parse_value_count += value_count;
+    trace->json_parse_object_entry_count += object_entry_count;
+    trace->json_parse_array_element_count += array_element_count;
+}
+
+static void js_gas_trace_record_json_stringify(JSContext *ctx,
+                                               uint64_t gas_cost,
+                                               BOOL count_call,
+                                               uint64_t output_bytes,
+                                               uint64_t value_count,
+                                               uint64_t object_entry_count,
+                                               uint64_t array_element_count,
+                                               uint64_t sort_comparison_count)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    if (count_call)
+        trace->json_stringify_count++;
+    trace->json_stringify_gas += gas_cost;
+    trace->json_stringify_output_bytes += output_bytes;
+    trace->json_stringify_value_count += value_count;
+    trace->json_stringify_object_entry_count += object_entry_count;
+    trace->json_stringify_array_element_count += array_element_count;
+    trace->json_stringify_sort_comparison_count += sort_comparison_count;
 }
 
 static int JS_InitAtoms(JSRuntime *rt);
@@ -2689,6 +2746,19 @@ int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace)
     out_trace->allocation_count = trace->allocation_count;
     out_trace->allocation_bytes = trace->allocation_bytes;
     out_trace->allocation_gas = trace->allocation_gas;
+    out_trace->json_parse_count = trace->json_parse_count;
+    out_trace->json_parse_gas = trace->json_parse_gas;
+    out_trace->json_parse_input_bytes = trace->json_parse_input_bytes;
+    out_trace->json_parse_value_count = trace->json_parse_value_count;
+    out_trace->json_parse_object_entry_count = trace->json_parse_object_entry_count;
+    out_trace->json_parse_array_element_count = trace->json_parse_array_element_count;
+    out_trace->json_stringify_count = trace->json_stringify_count;
+    out_trace->json_stringify_gas = trace->json_stringify_gas;
+    out_trace->json_stringify_output_bytes = trace->json_stringify_output_bytes;
+    out_trace->json_stringify_value_count = trace->json_stringify_value_count;
+    out_trace->json_stringify_object_entry_count = trace->json_stringify_object_entry_count;
+    out_trace->json_stringify_array_element_count = trace->json_stringify_array_element_count;
+    out_trace->json_stringify_sort_comparison_count = trace->json_stringify_sort_comparison_count;
 
     return 0;
 }
@@ -22065,6 +22135,9 @@ typedef struct JSParseState {
     BOOL is_module; /* parsing a module */
     BOOL allow_html_comments;
     BOOL ext_json; /* true if accepting JSON superset */
+    uint32_t det_json_max_string_bytes; /* 0 disables deterministic JSON string limits */
+    const char *det_json_string_label; /* error label for the next JSON string token */
+    BOOL det_json_skip_string_materialization; /* parse deterministic JSON strings without allocating tokens */
     GetLineColCache get_line_col_cache;
 } JSParseState;
 
@@ -23227,8 +23300,12 @@ static int json_parse_string(JSParseState *s, const uint8_t **pp, int sep)
     int i;
     uint32_t c;
     StringBuffer b_s, *b = &b_s;
+    uint64_t det_string_bytes = 0;
+    const char *det_string_label = s->det_json_string_label;
+    BOOL skip_string_materialization = s->det_json_skip_string_materialization;
+    uint8_t utf8_buf[UTF8_CHAR_LEN_MAX];
 
-    if (string_buffer_init(s->ctx, b, 32))
+    if (!skip_string_materialization && string_buffer_init(s->ctx, b, 32))
         goto fail;
 
     p = *pp;
@@ -23292,19 +23369,42 @@ static int json_parse_string(JSParseState *s, const uint8_t **pp, int sep)
             }
             p = p_next;
         }
+        if (s->det_json_max_string_bytes != 0) {
+            det_string_bytes += unicode_to_utf8(utf8_buf, c);
+            if (det_string_bytes > s->det_json_max_string_bytes) {
+                JS_ThrowTypeError(
+                    s->ctx,
+                    "%s exceeds maxStringBytes (%" PRIu64 " > %u)",
+                    det_string_label ? det_string_label : "JSON.parse string",
+                    det_string_bytes,
+                    s->det_json_max_string_bytes);
+                goto fail;
+            }
+        }
+        if (skip_string_materialization) {
+            if (is_surrogate(c)) {
+                JS_ThrowTypeError(
+                    s->ctx,
+                    "%s contains lone surrogate code points",
+                    det_string_label ? det_string_label : "JSON.parse string");
+                goto fail;
+            }
+            continue;
+        }
         if (string_buffer_putc(b, c))
             goto fail;
     }
     s->token.val = TOK_STRING;
     s->token.u.str.sep = sep;
-    s->token.u.str.str = string_buffer_end(b);
+    s->token.u.str.str = skip_string_materialization ? JS_UNDEFINED : string_buffer_end(b);
     *pp = p;
     return 0;
 
  end_of_input:
     js_parse_error(s, "Unexpected end of JSON input");
  fail:
-    string_buffer_free(b);
+    if (!skip_string_materialization)
+        string_buffer_free(b);
     return -1;
 }
 
@@ -49883,6 +49983,8 @@ static JSValue js_json_stringify(JSContext *ctx, JSValueConst this_val,
     // stringify(val, replacer, space)
     return JS_JSONStringify(ctx, argv[0], argv[1], argv[2]);
 }
+
+#include "quickjs-det-json.c"
 
 static const JSCFunctionListEntry js_json_funcs[] = {
     JS_CFUNC_DEF("parse", 2, js_json_parse ),
