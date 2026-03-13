@@ -416,9 +416,7 @@ enum {
     JS_DETERMINISTIC_DISABLED_ATOMICS = 12,
     JS_DETERMINISTIC_DISABLED_CONSOLE = 13,
     JS_DETERMINISTIC_DISABLED_PRINT = 14,
-    JS_DETERMINISTIC_DISABLED_JSON_PARSE = 15,
-    JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY = 16,
-    JS_DETERMINISTIC_DISABLED_ARRAY_SORT = 17,
+    JS_DETERMINISTIC_DISABLED_ARRAY_SORT = 15,
 };
 
 static const char *js_get_disabled_name(int magic)
@@ -426,10 +424,6 @@ static const char *js_get_disabled_name(int magic)
     switch (magic) {
     case JS_DETERMINISTIC_DISABLED_ARRAY_SORT:
         return "Array.prototype.sort";
-    case JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY:
-        return "JSON.stringify";
-    case JS_DETERMINISTIC_DISABLED_JSON_PARSE:
-        return "JSON.parse";
     case JS_DETERMINISTIC_DISABLED_PRINT:
         return "print";
     case JS_DETERMINISTIC_DISABLED_CONSOLE:
@@ -813,63 +807,6 @@ static int js_deterministic_disable_print(JSContext *ctx)
                                                    JS_DETERMINISTIC_DISABLED_PRINT);
 }
 
-static int js_deterministic_disable_json(JSContext *ctx)
-{
-    JSValue global;
-    JSValue json, parse_fn, stringify_fn;
-    int ret;
-
-    global = JS_GetGlobalObject(ctx);
-    if (JS_IsException(global))
-        return -1;
-
-    json = JS_GetPropertyStr(ctx, global, "JSON");
-    JS_FreeValue(ctx, global);
-    if (JS_IsException(json))
-        return -1;
-    if (!JS_IsObject(json)) {
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-
-    parse_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "parse", 2,
-                                    JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_PARSE);
-    if (JS_IsException(parse_fn)) {
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-    stringify_fn = JS_NewCFunctionMagic(ctx, js_deterministic_disabled, "stringify", 3,
-                                        JS_CFUNC_generic_magic, JS_DETERMINISTIC_DISABLED_JSON_STRINGIFY);
-    if (JS_IsException(stringify_fn)) {
-        JS_FreeValue(ctx, parse_fn);
-        JS_FreeValue(ctx, json);
-        return -1;
-    }
-
-    ret = JS_DefinePropertyValueStr(ctx, json, "parse", JS_DupValue(ctx, parse_fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    ret = JS_DefinePropertyValueStr(ctx, json, "stringify", JS_DupValue(ctx, stringify_fn),
-                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
-                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
-    if (ret < 0)
-        goto fail;
-
-    JS_FreeValue(ctx, parse_fn);
-    JS_FreeValue(ctx, stringify_fn);
-    JS_FreeValue(ctx, json);
-    return 0;
-
-fail:
-    JS_FreeValue(ctx, parse_fn);
-    JS_FreeValue(ctx, stringify_fn);
-    JS_FreeValue(ctx, json);
-    return -1;
-}
-
 static int js_deterministic_disable_array_sort(JSContext *ctx)
 {
     JSValue global;
@@ -982,7 +919,7 @@ int js_deterministic_init_context(JSContext *ctx)
         js_deterministic_disable_atomics(ctx) ||
         js_deterministic_disable_console(ctx) ||
         js_deterministic_disable_print(ctx) ||
-        js_deterministic_disable_json(ctx) ||
+        js_deterministic_install_json(ctx) ||
         js_deterministic_disable_array_sort(ctx) ||
         js_deterministic_disable_webassembly(ctx) ||
         js_deterministic_init_host(ctx)) {

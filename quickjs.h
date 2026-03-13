@@ -350,7 +350,7 @@ typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSV
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
 typedef JSValue JSCFunctionData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data);
 
-#define JS_GAS_VERSION_LATEST 1
+#define JS_GAS_VERSION_LATEST 2
 #define JS_GAS_UNLIMITED UINT64_C(0xffffffffffffffff)
 
 typedef struct JSMallocState {
@@ -418,6 +418,19 @@ typedef struct JSGasTrace {
     uint64_t allocation_count;
     uint64_t allocation_bytes;
     uint64_t allocation_gas;
+    uint64_t json_parse_count;
+    uint64_t json_parse_gas;
+    uint64_t json_parse_input_bytes;
+    uint64_t json_parse_value_count;
+    uint64_t json_parse_object_entry_count;
+    uint64_t json_parse_array_element_count;
+    uint64_t json_stringify_count;
+    uint64_t json_stringify_gas;
+    uint64_t json_stringify_output_bytes;
+    uint64_t json_stringify_value_count;
+    uint64_t json_stringify_object_entry_count;
+    uint64_t json_stringify_array_element_count;
+    uint64_t json_stringify_sort_comparison_count;
 } JSGasTrace;
 int JS_EnableGasTrace(JSContext *ctx, int enabled);
 int JS_ResetGasTrace(JSContext *ctx);
