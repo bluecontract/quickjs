@@ -18,6 +18,7 @@ extern void js_free(JSContext *ctx, void *ptr);
 
 #define DV_CBOR_MAJOR_UINT 0
 #define DV_CBOR_MAJOR_NINT 1
+#define DV_CBOR_MAJOR_BYTES 2
 #define DV_CBOR_MAJOR_TEXT 3
 #define DV_CBOR_MAJOR_ARRAY 4
 #define DV_CBOR_MAJOR_MAP 5
@@ -305,7 +306,8 @@ static int dv_encode_value(JSContext *ctx,
                            JSValueConst value,
                            const JSDvLimits *limits,
                            uint32_t depth,
-                           JSDvBuilder *builder);
+                           JSDvBuilder *builder,
+                           int allow_bytes);
 
 static const char *dv_tag_name(int tag)
 {
@@ -336,7 +338,8 @@ static int dv_encode_array(JSContext *ctx,
                            JSValueConst value,
                            const JSDvLimits *limits,
                            uint32_t depth,
-                           JSDvBuilder *builder) {
+                           JSDvBuilder *builder,
+                           int allow_bytes) {
     uint32_t next_depth = depth + 1;
     if (next_depth > limits->max_depth) {
         return dv_throw(ctx, "maxDepth %u exceeded", limits->max_depth);
@@ -370,7 +373,12 @@ static int dv_encode_array(JSContext *ctx,
         if (JS_IsException(element)) {
             return -1;
         }
-        int rc = dv_encode_value(ctx, element, limits, next_depth, builder);
+        int rc = dv_encode_value(ctx,
+                                 element,
+                                 limits,
+                                 next_depth,
+                                 builder,
+                                 allow_bytes);
         JS_FreeValue(ctx, element);
         if (rc != 0) {
             return -1;
@@ -394,7 +402,8 @@ static int dv_encode_object(JSContext *ctx,
                             JSValueConst value,
                             const JSDvLimits *limits,
                             uint32_t depth,
-                            JSDvBuilder *builder) {
+                            JSDvBuilder *builder,
+                            int allow_bytes) {
     uint32_t next_depth = depth + 1;
     if (next_depth > limits->max_depth) {
         return dv_throw(ctx, "maxDepth %u exceeded", limits->max_depth);
@@ -537,7 +546,12 @@ static int dv_encode_object(JSContext *ctx,
         if (JS_IsException(prop_val)) {
             goto encode_object_error;
         }
-        int rc = dv_encode_value(ctx, prop_val, limits, next_depth, builder);
+        int rc = dv_encode_value(ctx,
+                                 prop_val,
+                                 limits,
+                                 next_depth,
+                                 builder,
+                                 allow_bytes);
         JS_FreeValue(ctx, prop_val);
         if (rc != 0) {
             goto encode_object_error;
@@ -580,7 +594,8 @@ static int dv_encode_value(JSContext *ctx,
                            JSValueConst value,
                            const JSDvLimits *limits,
                            uint32_t depth,
-                           JSDvBuilder *builder) {
+                           JSDvBuilder *builder,
+                           int allow_bytes) {
     if (depth > limits->max_depth) {
         return dv_throw(ctx, "maxDepth %u exceeded", limits->max_depth);
     }
@@ -613,14 +628,63 @@ static int dv_encode_value(JSContext *ctx,
             return rc;
         }
         case JS_TAG_OBJECT: {
+            if (allow_bytes) {
+                size_t byte_offset = 0;
+                size_t byte_length = 0;
+                size_t bytes_per_element = 0;
+                JSValue buffer = JS_GetTypedArrayBuffer(ctx,
+                                                        value,
+                                                        &byte_offset,
+                                                        &byte_length,
+                                                        &bytes_per_element);
+                if (!JS_IsException(buffer)) {
+                    size_t buffer_length = 0;
+                    uint8_t *buffer_ptr = JS_GetArrayBuffer(ctx, &buffer_length, buffer);
+                    if (!buffer_ptr) {
+                        JS_FreeValue(ctx, buffer);
+                        return -1;
+                    }
+                    if (bytes_per_element != 1) {
+                        JS_FreeValue(ctx, buffer);
+                        return dv_throw(ctx, "unsupported DV type: typed array");
+                    }
+                    if (byte_length > limits->max_string_bytes) {
+                        JS_FreeValue(ctx, buffer);
+                        return dv_throw(ctx,
+                                        "byte string exceeds maxByteStringBytes (%zu > %u)",
+                                        byte_length,
+                                        limits->max_string_bytes);
+                    }
+                    if (byte_offset > buffer_length ||
+                        byte_length > buffer_length - byte_offset) {
+                        JS_FreeValue(ctx, buffer);
+                        return dv_throw(ctx, "typed array buffer range is invalid");
+                    }
+
+                    int rc = dv_encode_type_and_length(builder,
+                                                       DV_CBOR_MAJOR_BYTES,
+                                                       byte_length);
+                    if (rc == 0) {
+                        rc = dv_builder_push_bytes(builder, buffer_ptr + byte_offset, byte_length);
+                    }
+                    JS_FreeValue(ctx, buffer);
+                    return rc;
+                }
+
+                JSValue typed_array_error = JS_GetException(ctx);
+                if (!JS_IsUndefined(typed_array_error)) {
+                    JS_FreeValue(ctx, typed_array_error);
+                }
+            }
+
             int is_array = JS_IsArray(ctx, value);
             if (is_array < 0) {
                 return -1;
             }
             if (is_array) {
-                return dv_encode_array(ctx, value, limits, depth, builder);
+                return dv_encode_array(ctx, value, limits, depth, builder, allow_bytes);
             }
-            return dv_encode_object(ctx, value, limits, depth, builder);
+            return dv_encode_object(ctx, value, limits, depth, builder, allow_bytes);
         }
         default:
             {
@@ -632,10 +696,11 @@ static int dv_encode_value(JSContext *ctx,
     }
 }
 
-int JS_EncodeDV(JSContext *ctx,
-                JSValueConst value,
-                const JSDvLimits *maybe_limits,
-                JSDvBuffer *out_buffer) {
+static int dv_encode_internal(JSContext *ctx,
+                              JSValueConst value,
+                              const JSDvLimits *maybe_limits,
+                              JSDvBuffer *out_buffer,
+                              int allow_bytes) {
     const JSDvLimits *limits = dv_limits_or_default(maybe_limits);
     if (out_buffer) {
         out_buffer->data = NULL;
@@ -650,7 +715,7 @@ int JS_EncodeDV(JSContext *ctx,
         .max_size = limits->max_encoded_bytes,
     };
 
-    if (dv_encode_value(ctx, value, limits, 0, &builder) != 0) {
+    if (dv_encode_value(ctx, value, limits, 0, &builder, allow_bytes) != 0) {
         dv_builder_free(&builder);
         return -1;
     }
@@ -662,6 +727,20 @@ int JS_EncodeDV(JSContext *ctx,
         dv_builder_free(&builder);
     }
     return 0;
+}
+
+int JS_EncodeDV(JSContext *ctx,
+                JSValueConst value,
+                const JSDvLimits *maybe_limits,
+                JSDvBuffer *out_buffer) {
+    return dv_encode_internal(ctx, value, maybe_limits, out_buffer, 0);
+}
+
+int JS_EncodeDV2(JSContext *ctx,
+                 JSValueConst value,
+                 const JSDvLimits *maybe_limits,
+                 JSDvBuffer *out_buffer) {
+    return dv_encode_internal(ctx, value, maybe_limits, out_buffer, 1);
 }
 
 static int dv_reader_need(JSDvReader *reader, size_t amount) {
@@ -746,7 +825,8 @@ static int dv_read_length(JSDvReader *reader, uint8_t additional, uint64_t *out)
 static JSValue dv_decode_value(JSContext *ctx,
                                JSDvReader *reader,
                                const JSDvLimits *limits,
-                               uint32_t depth);
+                               uint32_t depth,
+                               int allow_bytes);
 
 static JSValue dv_decode_text(JSContext *ctx,
                               JSDvReader *reader,
@@ -780,11 +860,48 @@ static JSValue dv_decode_text(JSContext *ctx,
     return str;
 }
 
+static JSValue dv_decode_bytes(JSContext *ctx,
+                               JSDvReader *reader,
+                               const JSDvLimits *limits,
+                               uint8_t additional) {
+    uint64_t length64 = 0;
+    if (dv_read_length(reader, additional, &length64) != 0) {
+        return JS_EXCEPTION;
+    }
+
+    if (length64 > limits->max_string_bytes) {
+        JS_ThrowTypeError(ctx,
+                          "byte string exceeds maxByteStringBytes (%" PRIu64 " > %u)",
+                          length64,
+                          limits->max_string_bytes);
+        return JS_EXCEPTION;
+    }
+
+    size_t length = (size_t)length64;
+    if (dv_reader_need(reader, length) != 0) {
+        return JS_EXCEPTION;
+    }
+
+    const uint8_t *bytes = reader->data + reader->pos;
+    JSValue buffer = JS_NewArrayBufferCopy(ctx, bytes, length);
+    reader->pos += length;
+    if (JS_IsException(buffer)) {
+        return JS_EXCEPTION;
+    }
+
+    JSValue args[1];
+    args[0] = buffer;
+    JSValue typed = JS_NewTypedArray(ctx, 1, (JSValueConst *)args, JS_TYPED_ARRAY_UINT8);
+    JS_FreeValue(ctx, buffer);
+    return typed;
+}
+
 static JSValue dv_decode_array(JSContext *ctx,
                                JSDvReader *reader,
                                const JSDvLimits *limits,
                                uint32_t depth,
-                               uint8_t additional) {
+                               uint8_t additional,
+                               int allow_bytes) {
     uint64_t length64 = 0;
     if (dv_read_length(reader, additional, &length64) != 0) {
         return JS_EXCEPTION;
@@ -810,7 +927,11 @@ static JSValue dv_decode_array(JSContext *ctx,
     }
 
     for (uint32_t i = 0; i < length; i++) {
-        JSValue element = dv_decode_value(ctx, reader, limits, depth + 1);
+        JSValue element = dv_decode_value(ctx,
+                                          reader,
+                                          limits,
+                                          depth + 1,
+                                          allow_bytes);
         if (JS_IsException(element)) {
             JS_FreeValue(ctx, arr);
             return JS_EXCEPTION;
@@ -828,7 +949,8 @@ static JSValue dv_decode_map(JSContext *ctx,
                              JSDvReader *reader,
                              const JSDvLimits *limits,
                              uint32_t depth,
-                             uint8_t additional) {
+                             uint8_t additional,
+                             int allow_bytes) {
     uint64_t length64 = 0;
     if (dv_read_length(reader, additional, &length64) != 0) {
         return JS_EXCEPTION;
@@ -918,7 +1040,11 @@ static JSValue dv_decode_map(JSContext *ctx,
         }
         prev_key_len = key_len;
 
-        JSValue decoded = dv_decode_value(ctx, reader, limits, depth + 1);
+        JSValue decoded = dv_decode_value(ctx,
+                                          reader,
+                                          limits,
+                                          depth + 1,
+                                          allow_bytes);
         if (JS_IsException(decoded)) {
             JS_FreeValue(ctx, key_val);
             JS_FreeValue(ctx, obj);
@@ -1014,7 +1140,8 @@ static JSValue dv_decode_simple_or_float(JSContext *ctx,
 static JSValue dv_decode_value(JSContext *ctx,
                                JSDvReader *reader,
                                const JSDvLimits *limits,
-                               uint32_t depth) {
+                               uint32_t depth,
+                               int allow_bytes) {
     uint8_t initial = 0;
     if (dv_reader_read_u8(reader, &initial) != 0) {
         return JS_EXCEPTION;
@@ -1051,12 +1178,18 @@ static JSValue dv_decode_value(JSContext *ctx,
             int64_t neg = -1 - (int64_t)value;
             return JS_NewInt64(ctx, neg);
         }
+        case DV_CBOR_MAJOR_BYTES:
+            if (!allow_bytes) {
+                JS_ThrowTypeError(ctx, "unsupported CBOR major type %u", major);
+                return JS_EXCEPTION;
+            }
+            return dv_decode_bytes(ctx, reader, limits, additional);
         case DV_CBOR_MAJOR_TEXT:
             return dv_decode_text(ctx, reader, limits, additional);
         case DV_CBOR_MAJOR_ARRAY:
-            return dv_decode_array(ctx, reader, limits, depth, additional);
+            return dv_decode_array(ctx, reader, limits, depth, additional, allow_bytes);
         case DV_CBOR_MAJOR_MAP:
-            return dv_decode_map(ctx, reader, limits, depth, additional);
+            return dv_decode_map(ctx, reader, limits, depth, additional, allow_bytes);
         case DV_CBOR_MAJOR_SIMPLE:
             return dv_decode_simple_or_float(ctx, reader, limits, additional);
         default:
@@ -1065,10 +1198,11 @@ static JSValue dv_decode_value(JSContext *ctx,
     }
 }
 
-JSValue JS_DecodeDV(JSContext *ctx,
-                    const uint8_t *data,
-                    size_t length,
-                    const JSDvLimits *maybe_limits) {
+static JSValue dv_decode_internal(JSContext *ctx,
+                                  const uint8_t *data,
+                                  size_t length,
+                                  const JSDvLimits *maybe_limits,
+                                  int allow_bytes) {
     const JSDvLimits *limits = dv_limits_or_default(maybe_limits);
     if (length > limits->max_encoded_bytes) {
         JS_ThrowTypeError(ctx,
@@ -1085,7 +1219,7 @@ JSValue JS_DecodeDV(JSContext *ctx,
         .ctx = ctx,
     };
 
-    JSValue result = dv_decode_value(ctx, &reader, limits, 0);
+    JSValue result = dv_decode_value(ctx, &reader, limits, 0, allow_bytes);
     if (JS_IsException(result)) {
         return result;
     }
@@ -1097,6 +1231,20 @@ JSValue JS_DecodeDV(JSContext *ctx,
     }
 
     return result;
+}
+
+JSValue JS_DecodeDV(JSContext *ctx,
+                    const uint8_t *data,
+                    size_t length,
+                    const JSDvLimits *maybe_limits) {
+    return dv_decode_internal(ctx, data, length, maybe_limits, 0);
+}
+
+JSValue JS_DecodeDV2(JSContext *ctx,
+                     const uint8_t *data,
+                     size_t length,
+                     const JSDvLimits *maybe_limits) {
+    return dv_decode_internal(ctx, data, length, maybe_limits, 1);
 }
 
 void JS_FreeDVBuffer(JSContext *ctx, JSDvBuffer *buffer) {

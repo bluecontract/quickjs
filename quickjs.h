@@ -487,6 +487,8 @@ extern const JSDvLimits JS_DV_LIMIT_DEFAULTS;
 
 int JS_EncodeDV(JSContext *ctx, JSValueConst value, const JSDvLimits *limits, JSDvBuffer *out_buffer);
 JSValue JS_DecodeDV(JSContext *ctx, const uint8_t *data, size_t length, const JSDvLimits *limits);
+int JS_EncodeDV2(JSContext *ctx, JSValueConst value, const JSDvLimits *limits, JSDvBuffer *out_buffer);
+JSValue JS_DecodeDV2(JSContext *ctx, const uint8_t *data, size_t length, const JSDvLimits *limits);
 void JS_FreeDVBuffer(JSContext *ctx, JSDvBuffer *buffer);
 
 JSRuntime *JS_GetRuntime(JSContext *ctx);
