@@ -827,6 +827,169 @@ static int js_deterministic_disable_atomics(JSContext *ctx)
                                                    JS_DETERMINISTIC_DISABLED_ATOMICS);
 }
 
+static const char *js_deterministic_console_level_name(int magic)
+{
+    switch (magic) {
+    case 0:
+        return "log";
+    case 1:
+        return "info";
+    case 2:
+        return "warn";
+    case 3:
+        return "error";
+    case 4:
+    default:
+        return "debug";
+    }
+}
+
+static JSValue js_deterministic_console_method(JSContext *ctx,
+                                               JSValueConst this_val,
+                                               int argc,
+                                               JSValueConst *argv,
+                                               int magic)
+{
+    JSValue payload = JS_UNDEFINED;
+    JSValue args_array = JS_UNDEFINED;
+    JSValue global = JS_UNDEFINED;
+    JSValue host_ns = JS_UNDEFINED;
+    JSValue host_v1 = JS_UNDEFINED;
+    JSValue emit_fn = JS_UNDEFINED;
+    JSValue call_result = JS_UNDEFINED;
+    const char *level = js_deterministic_console_level_name(magic);
+    JSValue emit_args[1];
+
+    (void)this_val;
+
+    payload = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(payload))
+        goto fail;
+
+    args_array = JS_NewArray(ctx);
+    if (JS_IsException(args_array))
+        goto fail;
+
+    for (int i = 0; i < argc; i++) {
+        if (JS_SetPropertyUint32(ctx, args_array, (uint32_t)i, JS_DupValue(ctx, argv[i])) < 0)
+            goto fail;
+    }
+
+    if (JS_DefinePropertyValueStr(ctx, payload, "type",
+                                  JS_NewString(ctx, "console"),
+                                  JS_PROP_C_W_E) < 0)
+        goto fail;
+
+    if (JS_DefinePropertyValueStr(ctx, payload, "level",
+                                  JS_NewString(ctx, level),
+                                  JS_PROP_C_W_E) < 0)
+        goto fail;
+
+    if (JS_DefinePropertyValueStr(ctx, payload, "args",
+                                  JS_DupValue(ctx, args_array),
+                                  JS_PROP_C_W_E) < 0)
+        goto fail;
+
+    global = JS_GetGlobalObject(ctx);
+    if (JS_IsException(global))
+        goto fail;
+
+    host_ns = JS_GetPropertyStr(ctx, global, "Host");
+    if (JS_IsException(host_ns))
+        goto fail;
+
+    host_v1 = JS_GetPropertyStr(ctx, host_ns, "v1");
+    if (JS_IsException(host_v1))
+        goto fail;
+
+    emit_fn = JS_GetPropertyStr(ctx, host_v1, "emit");
+    if (JS_IsException(emit_fn))
+        goto fail;
+
+    if (!JS_IsFunction(ctx, emit_fn)) {
+        JS_ThrowTypeError(ctx, "console shim requires Host.v1.emit");
+        goto fail;
+    }
+
+    emit_args[0] = payload;
+    call_result = JS_Call(ctx, emit_fn, host_v1, 1, emit_args);
+    if (JS_IsException(call_result))
+        goto fail;
+
+    JS_FreeValue(ctx, call_result);
+    JS_FreeValue(ctx, emit_fn);
+    JS_FreeValue(ctx, host_v1);
+    JS_FreeValue(ctx, host_ns);
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, args_array);
+    JS_FreeValue(ctx, payload);
+    return JS_UNDEFINED;
+
+fail:
+    if (!JS_IsUndefined(call_result))
+        JS_FreeValue(ctx, call_result);
+    if (!JS_IsUndefined(emit_fn))
+        JS_FreeValue(ctx, emit_fn);
+    if (!JS_IsUndefined(host_v1))
+        JS_FreeValue(ctx, host_v1);
+    if (!JS_IsUndefined(host_ns))
+        JS_FreeValue(ctx, host_ns);
+    if (!JS_IsUndefined(global))
+        JS_FreeValue(ctx, global);
+    if (!JS_IsUndefined(args_array))
+        JS_FreeValue(ctx, args_array);
+    if (!JS_IsUndefined(payload))
+        JS_FreeValue(ctx, payload);
+    return JS_EXCEPTION;
+}
+
+static int js_deterministic_enable_console(JSContext *ctx)
+{
+    JSValue console;
+    JSValue global;
+    int ret;
+    static const char *const methods[] = {"log", "info", "warn", "error", "debug"};
+
+    console = JS_NewObjectProto(ctx, JS_NULL);
+    if (JS_IsException(console))
+        return -1;
+
+    for (size_t i = 0; i < countof(methods); i++) {
+        JSValue fn = JS_NewCFunctionMagic(ctx, js_deterministic_console_method,
+                                          methods[i], 1, JS_CFUNC_generic_magic,
+                                          (int)i);
+        if (JS_IsException(fn)) {
+            JS_FreeValue(ctx, console);
+            return -1;
+        }
+
+        if (JS_DefinePropertyValueStr(ctx, console, methods[i], JS_DupValue(ctx, fn),
+                                      JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                          JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE) < 0) {
+            JS_FreeValue(ctx, fn);
+            JS_FreeValue(ctx, console);
+            return -1;
+        }
+        JS_FreeValue(ctx, fn);
+    }
+
+    global = JS_GetGlobalObject(ctx);
+    if (JS_IsException(global)) {
+        JS_FreeValue(ctx, console);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, global, "console", JS_DupValue(ctx, console),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, console);
+
+    if (ret < 0)
+        return -1;
+    return 0;
+}
+
 static int js_deterministic_disable_console(JSContext *ctx)
 {
     JSValue console;
@@ -979,7 +1142,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
 {
     if (feature_flags &
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
-          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS)) {
+          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
+          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
@@ -988,6 +1152,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         (feature_flags & JS_DETERMINISTIC_FEATURE_REGEXP) != 0;
     JS_BOOL promise_jobs_enabled =
         (feature_flags & JS_DETERMINISTIC_FEATURE_PROMISE_JOBS) != 0;
+    JS_BOOL console_shim_enabled =
+        (feature_flags & JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM) != 0;
 
     if (JS_AddIntrinsicBaseObjects(ctx) ||
         JS_AddIntrinsicEval(ctx) ||
@@ -1004,7 +1170,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         (promise_jobs_enabled ? js_deterministic_enable_queue_microtask(ctx) : 0) ||
         js_deterministic_disable_typed_arrays(ctx) ||
         js_deterministic_disable_atomics(ctx) ||
-        js_deterministic_disable_console(ctx) ||
+        (console_shim_enabled ? js_deterministic_enable_console(ctx)
+                              : js_deterministic_disable_console(ctx)) ||
         js_deterministic_disable_print(ctx) ||
         js_deterministic_install_json(ctx) ||
         js_deterministic_disable_array_sort(ctx) ||
@@ -1098,7 +1265,8 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
 
     if (options->feature_flags &
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
-          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS)) {
+          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
+          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
