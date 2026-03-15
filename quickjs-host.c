@@ -10,6 +10,9 @@
 #define JS_HOST_ERROR_CODE_ENVELOPE_INVALID "HOST_ENVELOPE_INVALID"
 #define JS_HOST_ERROR_TAG_ENVELOPE_INVALID "host/envelope_invalid"
 
+static JSHostManifest *js_host_find_manifest(JSContext *ctx);
+static const char *js_host_namespace_name(const JSHostManifest *manifest);
+
 static JSValue js_throw_host_error_str(JSContext *ctx, const char *code, const char *tag, JSValueConst details)
 {
     JSValue ret;
@@ -162,7 +165,9 @@ int JS_ParseHostResponse(JSContext *ctx,
         return -1;
     }
 
-    envelope = JS_DecodeDV(ctx, data, length, &JS_DV_LIMIT_DEFAULTS);
+    envelope = validation->allow_bytes
+                   ? JS_DecodeDV2(ctx, data, length, &JS_DV_LIMIT_DEFAULTS)
+                   : JS_DecodeDV(ctx, data, length, &JS_DV_LIMIT_DEFAULTS);
     if (JS_IsException(envelope)) {
         has_pending_exception = TRUE;
         goto envelope_invalid;
@@ -853,11 +858,13 @@ static JSValue js_deterministic_console_method(JSContext *ctx,
     JSValue payload = JS_UNDEFINED;
     JSValue args_array = JS_UNDEFINED;
     JSValue global = JS_UNDEFINED;
+    JSValue host_root = JS_UNDEFINED;
     JSValue host_ns = JS_UNDEFINED;
-    JSValue host_v1 = JS_UNDEFINED;
     JSValue emit_fn = JS_UNDEFINED;
     JSValue call_result = JS_UNDEFINED;
     const char *level = js_deterministic_console_level_name(magic);
+    const JSHostManifest *manifest = js_host_find_manifest(ctx);
+    const char *host_namespace = js_host_namespace_name(manifest);
     JSValue emit_args[1];
 
     (void)this_val;
@@ -894,32 +901,32 @@ static JSValue js_deterministic_console_method(JSContext *ctx,
     if (JS_IsException(global))
         goto fail;
 
-    host_ns = JS_GetPropertyStr(ctx, global, "Host");
+    host_root = JS_GetPropertyStr(ctx, global, "Host");
+    if (JS_IsException(host_root))
+        goto fail;
+
+    host_ns = JS_GetPropertyStr(ctx, host_root, host_namespace);
     if (JS_IsException(host_ns))
         goto fail;
 
-    host_v1 = JS_GetPropertyStr(ctx, host_ns, "v1");
-    if (JS_IsException(host_v1))
-        goto fail;
-
-    emit_fn = JS_GetPropertyStr(ctx, host_v1, "emit");
+    emit_fn = JS_GetPropertyStr(ctx, host_ns, "emit");
     if (JS_IsException(emit_fn))
         goto fail;
 
     if (!JS_IsFunction(ctx, emit_fn)) {
-        JS_ThrowTypeError(ctx, "console shim requires Host.v1.emit");
+        JS_ThrowTypeError(ctx, "console shim requires Host.%s.emit", host_namespace);
         goto fail;
     }
 
     emit_args[0] = payload;
-    call_result = JS_Call(ctx, emit_fn, host_v1, 1, emit_args);
+    call_result = JS_Call(ctx, emit_fn, host_ns, 1, emit_args);
     if (JS_IsException(call_result))
         goto fail;
 
     JS_FreeValue(ctx, call_result);
     JS_FreeValue(ctx, emit_fn);
-    JS_FreeValue(ctx, host_v1);
     JS_FreeValue(ctx, host_ns);
+    JS_FreeValue(ctx, host_root);
     JS_FreeValue(ctx, global);
     JS_FreeValue(ctx, args_array);
     JS_FreeValue(ctx, payload);
@@ -930,10 +937,10 @@ fail:
         JS_FreeValue(ctx, call_result);
     if (!JS_IsUndefined(emit_fn))
         JS_FreeValue(ctx, emit_fn);
-    if (!JS_IsUndefined(host_v1))
-        JS_FreeValue(ctx, host_v1);
     if (!JS_IsUndefined(host_ns))
         JS_FreeValue(ctx, host_ns);
+    if (!JS_IsUndefined(host_root))
+        JS_FreeValue(ctx, host_root);
     if (!JS_IsUndefined(global))
         JS_FreeValue(ctx, global);
     if (!JS_IsUndefined(args_array))
@@ -1243,7 +1250,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
           JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
           JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM |
-          JS_DETERMINISTIC_FEATURE_STABLE_SORT)) {
+          JS_DETERMINISTIC_FEATURE_STABLE_SORT |
+          JS_DETERMINISTIC_FEATURE_TYPED_ARRAYS)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
@@ -1256,11 +1264,14 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         (feature_flags & JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM) != 0;
     JS_BOOL stable_sort_enabled =
         (feature_flags & JS_DETERMINISTIC_FEATURE_STABLE_SORT) != 0;
+    JS_BOOL typed_arrays_enabled =
+        (feature_flags & JS_DETERMINISTIC_FEATURE_TYPED_ARRAYS) != 0;
 
     if (JS_AddIntrinsicBaseObjects(ctx) ||
         JS_AddIntrinsicEval(ctx) ||
         JS_AddIntrinsicJSON(ctx) ||
         JS_AddIntrinsicMapSet(ctx) ||
+        (typed_arrays_enabled ? JS_AddIntrinsicTypedArrays(ctx) : 0) ||
         (promise_jobs_enabled ? JS_AddIntrinsicPromise(ctx) : 0) ||
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
@@ -1270,7 +1281,7 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         js_deterministic_disable_random(ctx) ||
         (promise_jobs_enabled ? 0 : js_deterministic_disable_promise(ctx)) ||
         (promise_jobs_enabled ? js_deterministic_enable_queue_microtask(ctx) : 0) ||
-        js_deterministic_disable_typed_arrays(ctx) ||
+        (typed_arrays_enabled ? 0 : js_deterministic_disable_typed_arrays(ctx)) ||
         js_deterministic_disable_atomics(ctx) ||
         (console_shim_enabled ? js_deterministic_enable_console(ctx)
                               : js_deterministic_disable_console(ctx)) ||
@@ -1370,7 +1381,8 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
           JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
           JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM |
-          JS_DETERMINISTIC_FEATURE_STABLE_SORT)) {
+          JS_DETERMINISTIC_FEATURE_STABLE_SORT |
+          JS_DETERMINISTIC_FEATURE_TYPED_ARRAYS)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
@@ -1570,7 +1582,7 @@ int JS_HostCall(JSContext *ctx,
 }
 
 /* ------------------------------------------------------------------------- */
-/* Host manifest parsing and Host.v1 generation (T-040) */
+/* Host manifest parsing and Host namespace generation (T-040) */
 
 extern void *js_malloc(JSContext *ctx, size_t size);
 extern void js_free(JSContext *ctx, void *ptr);
@@ -1617,6 +1629,9 @@ typedef struct {
 struct JSHostManifest {
     JSHostFunctionDef *functions;
     size_t function_count;
+    uint32_t abi_version;
+    uint32_t host_namespace_version;
+    int allow_bytes;
 };
 
 typedef struct {
@@ -1663,6 +1678,13 @@ static JSHostTapeState *js_host_get_tape(JSContext *ctx)
     if (!node)
         return NULL;
     return &node->tape;
+}
+
+static const char *js_host_namespace_name(const JSHostManifest *manifest)
+{
+    if (!manifest || manifest->host_namespace_version == 0)
+        return "v1";
+    return manifest->host_namespace_version == 2 ? "v2" : "v1";
 }
 
 static void js_host_free_function(JSContext *ctx, JSHostFunctionDef *fn)
@@ -1712,6 +1734,9 @@ static void js_host_manifest_clear(JSContext *ctx, JSHostManifest *manifest)
     }
     manifest->functions = NULL;
     manifest->function_count = 0;
+    manifest->abi_version = 0;
+    manifest->host_namespace_version = 0;
+    manifest->allow_bytes = 0;
 }
 
 static void js_host_tape_free(JSContext *ctx, JSHostTapeState *tape)
@@ -2392,9 +2417,11 @@ done:
     return ret;
 }
 
-static int js_host_build_function_name(JSContext *ctx, JSHostFunctionDef *fn)
+static int js_host_build_function_name(JSContext *ctx,
+                                       JSHostFunctionDef *fn,
+                                       uint32_t host_namespace_version)
 {
-    const char *prefix = "Host.v1";
+    const char *prefix = host_namespace_version == 2 ? "Host.v2" : "Host.v1";
     size_t total = strlen(prefix) + 1; /* null terminator */
 
     for (size_t i = 0; i < fn->path_len; i++)
@@ -2415,7 +2442,8 @@ static int js_host_build_function_name(JSContext *ctx, JSHostFunctionDef *fn)
 static int js_host_validate_function(JSContext *ctx,
                                      JSValueConst fn_val,
                                      const char *path,
-                                     JSHostFunctionDef *out_fn)
+                                     JSHostFunctionDef *out_fn,
+                                     uint32_t host_namespace_version)
 {
     const char *required[] = {"fn_id", "js_path", "effect", "arity", "arg_schema", "return_schema", "gas", "limits", "error_codes"};
     JSValue fn_id = JS_UNDEFINED;
@@ -2591,7 +2619,7 @@ static int js_host_validate_function(JSContext *ctx,
         }
     }
 
-    if (js_host_build_function_name(ctx, out_fn))
+    if (js_host_build_function_name(ctx, out_fn, host_namespace_version))
         goto done;
 
     ret = 0;
@@ -2659,8 +2687,14 @@ static int js_host_validate_manifest(JSContext *ctx, JSValueConst manifest_val, 
         goto done;
     if (js_host_copy_non_empty_string(ctx, abi_id, "manifest.abi_id", &abi_id_str))
         goto done;
-    if (strcmp(abi_id_str, "Host.v1") != 0) {
-        js_host_manifest_error(ctx, "manifest.abi_id", "unsupported abi_id (expected Host.v1)");
+    if (strcmp(abi_id_str, "Host.v1") == 0) {
+        out_manifest->host_namespace_version = 1;
+        out_manifest->allow_bytes = 0;
+    } else if (strcmp(abi_id_str, "Host.v2") == 0) {
+        out_manifest->host_namespace_version = 2;
+        out_manifest->allow_bytes = 1;
+    } else {
+        js_host_manifest_error(ctx, "manifest.abi_id", "unsupported abi_id (expected Host.v1 or Host.v2)");
         goto done;
     }
 
@@ -2670,10 +2704,15 @@ static int js_host_validate_manifest(JSContext *ctx, JSValueConst manifest_val, 
     uint32_t version = 0;
     if (js_host_validate_uint32(ctx, abi_version, "manifest.abi_version", 1, UINT32_MAX, &version))
         goto done;
-    if (version != 1) {
-        js_host_manifest_error(ctx, "manifest.abi_version", "unsupported abi_version (expected 1)");
+    if (version != out_manifest->host_namespace_version) {
+        js_host_manifest_error(ctx,
+                               "manifest.abi_version",
+                               out_manifest->host_namespace_version == 2
+                                   ? "unsupported abi_version (expected 2)"
+                                   : "unsupported abi_version (expected 1)");
         goto done;
     }
+    out_manifest->abi_version = version;
 
     functions = JS_GetPropertyStr(ctx, manifest_val, "functions");
     if (JS_IsException(functions))
@@ -2704,7 +2743,11 @@ static int js_host_validate_manifest(JSContext *ctx, JSValueConst manifest_val, 
         char fn_path[96];
         snprintf(fn_path, sizeof(fn_path), "manifest.functions[%zu]", i);
 
-        if (js_host_validate_function(ctx, fn_val, fn_path, &out_manifest->functions[i])) {
+        if (js_host_validate_function(ctx,
+                                      fn_val,
+                                      fn_path,
+                                      &out_manifest->functions[i],
+                                      out_manifest->host_namespace_version)) {
             JS_FreeValue(ctx, fn_val);
             goto done;
         }
@@ -2944,7 +2987,9 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
     JSDvLimits dv_limits = JS_DV_LIMIT_DEFAULTS;
     dv_limits.max_encoded_bytes = fn->max_request_bytes;
 
-    if (JS_EncodeDV(ctx, args_array, &dv_limits, &req_buf)) {
+    if ((manifest->allow_bytes
+             ? JS_EncodeDV2(ctx, args_array, &dv_limits, &req_buf)
+             : JS_EncodeDV(ctx, args_array, &dv_limits, &req_buf))) {
         JS_FreeValue(ctx, args_array);
         JS_FreeDVBuffer(ctx, &req_buf);
         return JS_EXCEPTION;
@@ -2994,6 +3039,7 @@ static JSValue js_host_call_wrapper(JSContext *ctx,
         .max_units = fn->max_units,
         .errors = fn->errors,
         .error_count = fn->error_count,
+        .allow_bytes = manifest->allow_bytes ? 1 : 0,
     };
 
     if (JS_ParseHostResponse(ctx, result.data, result.length, &validation, &resp))
@@ -3064,11 +3110,12 @@ static int js_host_install_functions(JSContext *ctx, JSHostManifest *manifest)
 {
     JSValue global = JS_UNDEFINED;
     JSValue host = JS_UNDEFINED;
-    JSValue host_v1 = JS_UNDEFINED;
+    JSValue host_ns = JS_UNDEFINED;
     JSValue *namespaces = NULL;
     size_t ns_count = 0;
     size_t ns_capacity = 0;
     int ret = -1;
+    const char *host_namespace = manifest->host_namespace_version == 2 ? "v2" : "v1";
 
     global = JS_GetGlobalObject(ctx);
     if (JS_IsException(global))
@@ -3077,11 +3124,11 @@ static int js_host_install_functions(JSContext *ctx, JSHostManifest *manifest)
     if (js_host_get_or_create_child(ctx, global, "Host", &host, &namespaces, &ns_count, &ns_capacity))
         goto done;
 
-    if (js_host_get_or_create_child(ctx, host, "v1", &host_v1, &namespaces, &ns_count, &ns_capacity))
+    if (js_host_get_or_create_child(ctx, host, host_namespace, &host_ns, &namespaces, &ns_count, &ns_capacity))
         goto done;
 
     for (size_t i = 0; i < manifest->function_count; i++) {
-        JSValue current = JS_DupValue(ctx, host_v1);
+        JSValue current = JS_DupValue(ctx, host_ns);
         if (JS_IsException(current))
             goto done;
 
@@ -3150,8 +3197,8 @@ done:
             JS_FreeValue(ctx, namespaces[i]);
         js_free(ctx, namespaces);
     }
-    if (!JS_IsUndefined(host_v1))
-        JS_FreeValue(ctx, host_v1);
+    if (!JS_IsUndefined(host_ns))
+        JS_FreeValue(ctx, host_ns);
     if (!JS_IsUndefined(host))
         JS_FreeValue(ctx, host);
     if (!JS_IsUndefined(global))
@@ -3683,7 +3730,7 @@ static JSValue js_document_wrapper(JSContext *ctx,
     (void)magic;
 
     if (!func_data || !JS_IsFunction(ctx, func_data[0])) {
-        JS_ThrowTypeError(ctx, "Host.v1.document binding is missing");
+        JS_ThrowTypeError(ctx, "Host document binding is missing");
         return JS_EXCEPTION;
     }
 
@@ -3701,7 +3748,7 @@ static JSValue js_emit_wrapper(JSContext *ctx,
     (void)magic;
 
     if (!func_data || !JS_IsFunction(ctx, func_data[0])) {
-        JS_ThrowTypeError(ctx, "Host.v1.emit binding is missing");
+        JS_ThrowTypeError(ctx, "Host emit binding is missing");
         return JS_EXCEPTION;
     }
 
@@ -3925,8 +3972,8 @@ done:
 int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t context_blob_size)
 {
     JSValue global = JS_UNDEFINED;
-    JSValue host = JS_UNDEFINED;
-    JSValue host_v1 = JS_UNDEFINED;
+    JSValue host_root = JS_UNDEFINED;
+    JSValue host_ns = JS_UNDEFINED;
     JSValue document_ns = JS_UNDEFINED;
     JSValue document_get = JS_UNDEFINED;
     JSValue document_get_canonical = JS_UNDEFINED;
@@ -3945,14 +3992,18 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     JSValueConst doc_funcs[1];
     JSValueConst emit_funcs[1];
     int ret = -1;
+    const JSHostManifest *manifest = NULL;
+    const char *host_namespace = "v1";
 
     if (!ctx)
         return -1;
 
-    if (!js_host_find_manifest(ctx)) {
+    manifest = js_host_find_manifest(ctx);
+    if (!manifest) {
         JS_ThrowTypeError(ctx, "abi manifest must be initialized before installing ergonomic globals");
         return -1;
     }
+    host_namespace = js_host_namespace_name(manifest);
 
     if (js_decode_context_blob(ctx, context_blob, context_blob_size,
                                &event_val, &event_canonical_val, &steps_val,
@@ -3963,15 +4014,15 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     if (JS_IsException(global))
         goto done;
 
-    host = JS_GetPropertyStr(ctx, global, "Host");
-    if (JS_IsException(host))
+    host_root = JS_GetPropertyStr(ctx, global, "Host");
+    if (JS_IsException(host_root))
         goto done;
 
-    host_v1 = JS_GetPropertyStr(ctx, host, "v1");
-    if (JS_IsException(host_v1))
+    host_ns = JS_GetPropertyStr(ctx, host_root, host_namespace);
+    if (JS_IsException(host_ns))
         goto done;
 
-    document_ns = JS_GetPropertyStr(ctx, host_v1, "document");
+    document_ns = JS_GetPropertyStr(ctx, host_ns, "document");
     if (JS_IsException(document_ns))
         goto done;
 
@@ -3984,7 +4035,7 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
         goto done;
 
     if (!JS_IsFunction(ctx, document_get) || !JS_IsFunction(ctx, document_get_canonical)) {
-        JS_ThrowTypeError(ctx, "Host.v1.document bindings are missing");
+        JS_ThrowTypeError(ctx, "Host.%s.document bindings are missing", host_namespace);
         goto done;
     }
 
@@ -4019,13 +4070,13 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     if (JS_PreventExtensions(ctx, document_canonical_fn) < 0)
         goto done;
 
-    emit_call = JS_GetPropertyStr(ctx, host_v1, "emit");
+    emit_call = JS_GetPropertyStr(ctx, host_ns, "emit");
     if (JS_IsException(emit_call))
         goto done;
 
     if (!JS_IsUndefined(emit_call)) {
         if (!JS_IsFunction(ctx, emit_call)) {
-            JS_ThrowTypeError(ctx, "Host.v1.emit binding is missing");
+            JS_ThrowTypeError(ctx, "Host.%s.emit binding is missing", host_namespace);
             goto done;
         }
 
@@ -4124,10 +4175,10 @@ int JS_InitErgonomicGlobals(JSContext *ctx, const uint8_t *context_blob, size_t 
     ret = 0;
 
 done:
-    if (!JS_IsUndefined(host_v1))
-        JS_FreeValue(ctx, host_v1);
-    if (!JS_IsUndefined(host))
-        JS_FreeValue(ctx, host);
+    if (!JS_IsUndefined(host_ns))
+        JS_FreeValue(ctx, host_ns);
+    if (!JS_IsUndefined(host_root))
+        JS_FreeValue(ctx, host_root);
     if (!JS_IsUndefined(global))
         JS_FreeValue(ctx, global);
     if (!JS_IsUndefined(document_ns))

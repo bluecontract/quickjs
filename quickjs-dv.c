@@ -889,9 +889,24 @@ static JSValue dv_decode_bytes(JSContext *ctx,
         return JS_EXCEPTION;
     }
 
-    JSValue args[1];
+    JSValue args[3];
     args[0] = buffer;
-    JSValue typed = JS_NewTypedArray(ctx, 1, (JSValueConst *)args, JS_TYPED_ARRAY_UINT8);
+    args[1] = JS_NewUint32(ctx, 0);
+    args[2] = JS_NewUint32(ctx, (uint32_t)length);
+    if (JS_IsException(args[1]) || JS_IsException(args[2])) {
+        if (!JS_IsException(args[1])) {
+            JS_FreeValue(ctx, args[1]);
+        }
+        if (!JS_IsException(args[2])) {
+            JS_FreeValue(ctx, args[2]);
+        }
+        JS_FreeValue(ctx, buffer);
+        return JS_EXCEPTION;
+    }
+
+    JSValue typed = JS_NewTypedArray(ctx, 3, (JSValueConst *)args, JS_TYPED_ARRAY_UINT8);
+    JS_FreeValue(ctx, args[2]);
+    JS_FreeValue(ctx, args[1]);
     JS_FreeValue(ctx, buffer);
     return typed;
 }

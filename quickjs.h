@@ -349,6 +349,7 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 #define JS_DETERMINISTIC_FEATURE_PROMISE_JOBS (1u << 1)
 #define JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM (1u << 2)
 #define JS_DETERMINISTIC_FEATURE_STABLE_SORT (1u << 3)
+#define JS_DETERMINISTIC_FEATURE_TYPED_ARRAYS (1u << 4)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);

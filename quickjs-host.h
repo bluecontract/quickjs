@@ -12,6 +12,7 @@ typedef struct JSHostResponseValidation {
     uint32_t max_units;
     const JSHostErrorEntry *errors;
     size_t error_count;
+    uint8_t allow_bytes;
 } JSHostResponseValidation;
 
 typedef struct JSHostResponse {
