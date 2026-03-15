@@ -346,6 +346,7 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 #define JS_DETERMINISTIC_MAX_MANIFEST_BYTES 1048576
 #define JS_DETERMINISTIC_MAX_CONTEXT_BLOB_BYTES 5242880
 #define JS_DETERMINISTIC_FEATURE_REGEXP (1u << 0)
+#define JS_DETERMINISTIC_FEATURE_PROMISE_JOBS (1u << 1)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);

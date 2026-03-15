@@ -719,6 +719,70 @@ static int js_deterministic_disable_promise(JSContext *ctx)
     return 0;
 }
 
+static JSValue js_deterministic_queue_microtask_job(JSContext *ctx,
+                                                    int argc,
+                                                    JSValueConst *argv)
+{
+    JSValue callback = JS_UNDEFINED;
+    JSValue result = JS_UNDEFINED;
+
+    if (argc < 1) {
+        return JS_UNDEFINED;
+    }
+
+    callback = JS_DupValue(ctx, argv[0]);
+    result = JS_Call(ctx, callback, JS_UNDEFINED, 0, NULL);
+    JS_FreeValue(ctx, callback);
+    return result;
+}
+
+static JSValue js_deterministic_queue_microtask(JSContext *ctx,
+                                                JSValueConst this_val,
+                                                int argc,
+                                                JSValueConst *argv)
+{
+    (void)this_val;
+
+    if (argc < 1 || !JS_IsFunction(ctx, argv[0])) {
+        return JS_ThrowTypeError(ctx, "queueMicrotask callback must be callable");
+    }
+
+    if (JS_EnqueueJob(ctx, js_deterministic_queue_microtask_job, 1, argv) != 0) {
+        return JS_EXCEPTION;
+    }
+
+    return JS_UNDEFINED;
+}
+
+static int js_deterministic_enable_queue_microtask(JSContext *ctx)
+{
+    JSValue queue_fn;
+    JSValue global;
+    int ret;
+
+    queue_fn = JS_NewCFunction(ctx, js_deterministic_queue_microtask,
+                               "queueMicrotask", 1);
+    if (JS_IsException(queue_fn))
+        return -1;
+
+    global = JS_GetGlobalObject(ctx);
+    if (JS_IsException(global)) {
+        JS_FreeValue(ctx, queue_fn);
+        return -1;
+    }
+
+    ret = JS_DefinePropertyValueStr(ctx, global, "queueMicrotask",
+                                    JS_DupValue(ctx, queue_fn),
+                                    JS_PROP_HAS_VALUE | JS_PROP_HAS_CONFIGURABLE |
+                                        JS_PROP_HAS_WRITABLE | JS_PROP_HAS_ENUMERABLE);
+    JS_FreeValue(ctx, global);
+    JS_FreeValue(ctx, queue_fn);
+
+    if (ret < 0)
+        return -1;
+    return 0;
+}
+
 static int js_deterministic_disable_typed_arrays(JSContext *ctx)
 {
     static const struct {
@@ -913,25 +977,31 @@ fail:
 
 int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
 {
-    if (feature_flags & ~JS_DETERMINISTIC_FEATURE_REGEXP) {
+    if (feature_flags &
+        ~(JS_DETERMINISTIC_FEATURE_REGEXP |
+          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
 
     JS_BOOL regexp_enabled =
         (feature_flags & JS_DETERMINISTIC_FEATURE_REGEXP) != 0;
+    JS_BOOL promise_jobs_enabled =
+        (feature_flags & JS_DETERMINISTIC_FEATURE_PROMISE_JOBS) != 0;
 
     if (JS_AddIntrinsicBaseObjects(ctx) ||
         JS_AddIntrinsicEval(ctx) ||
         JS_AddIntrinsicJSON(ctx) ||
         JS_AddIntrinsicMapSet(ctx) ||
+        (promise_jobs_enabled ? JS_AddIntrinsicPromise(ctx) : 0) ||
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
         (regexp_enabled ? js_deterministic_enable_regexp(ctx)
                         : js_deterministic_disable_regexp(ctx)) ||
         js_deterministic_disable_proxy(ctx) ||
         js_deterministic_disable_random(ctx) ||
-        js_deterministic_disable_promise(ctx) ||
+        (promise_jobs_enabled ? 0 : js_deterministic_disable_promise(ctx)) ||
+        (promise_jobs_enabled ? js_deterministic_enable_queue_microtask(ctx) : 0) ||
         js_deterministic_disable_typed_arrays(ctx) ||
         js_deterministic_disable_atomics(ctx) ||
         js_deterministic_disable_console(ctx) ||
@@ -1026,7 +1096,9 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
     if (!ctx || !options)
         return -1;
 
-    if (options->feature_flags & ~JS_DETERMINISTIC_FEATURE_REGEXP) {
+    if (options->feature_flags &
+        ~(JS_DETERMINISTIC_FEATURE_REGEXP |
+          JS_DETERMINISTIC_FEATURE_PROMISE_JOBS)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
