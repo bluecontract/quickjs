@@ -631,6 +631,14 @@ static int js_deterministic_disable_regexp(JSContext *ctx)
     return 0;
 }
 
+static int js_deterministic_enable_regexp(JSContext *ctx)
+{
+    JS_AddIntrinsicRegExpCompiler(ctx);
+    if (JS_AddIntrinsicRegExp(ctx))
+        return -1;
+    return 0;
+}
+
 static int js_deterministic_disable_proxy(JSContext *ctx)
 {
     JSValue fn;
@@ -903,15 +911,24 @@ fail:
     return -1;
 }
 
-int js_deterministic_init_context(JSContext *ctx)
+int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
 {
+    if (feature_flags & ~JS_DETERMINISTIC_FEATURE_REGEXP) {
+        JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
+        return -1;
+    }
+
+    JS_BOOL regexp_enabled =
+        (feature_flags & JS_DETERMINISTIC_FEATURE_REGEXP) != 0;
+
     if (JS_AddIntrinsicBaseObjects(ctx) ||
         JS_AddIntrinsicEval(ctx) ||
         JS_AddIntrinsicJSON(ctx) ||
         JS_AddIntrinsicMapSet(ctx) ||
         js_deterministic_disable_eval(ctx) ||
         js_deterministic_disable_function(ctx) ||
-        js_deterministic_disable_regexp(ctx) ||
+        (regexp_enabled ? js_deterministic_enable_regexp(ctx)
+                        : js_deterministic_disable_regexp(ctx)) ||
         js_deterministic_disable_proxy(ctx) ||
         js_deterministic_disable_random(ctx) ||
         js_deterministic_disable_promise(ctx) ||
@@ -1008,6 +1025,11 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
 
     if (!ctx || !options)
         return -1;
+
+    if (options->feature_flags & ~JS_DETERMINISTIC_FEATURE_REGEXP) {
+        JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
+        return -1;
+    }
 
     if (js_deterministic_manifest_is_initialized(ctx)) {
         JS_ThrowTypeError(ctx, "abi manifest is already initialized");

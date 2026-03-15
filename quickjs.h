@@ -345,6 +345,7 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 
 #define JS_DETERMINISTIC_MAX_MANIFEST_BYTES 1048576
 #define JS_DETERMINISTIC_MAX_CONTEXT_BLOB_BYTES 5242880
+#define JS_DETERMINISTIC_FEATURE_REGEXP (1u << 0)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
@@ -391,6 +392,9 @@ JS_BOOL JS_IsLiveObject(JSRuntime *rt, JSValueConst obj);
 
 JSContext *JS_NewContext(JSRuntime *rt);
 int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx);
+int JS_NewDeterministicRuntimeWithFeatures(JSRuntime **out_rt,
+                                           JSContext **out_ctx,
+                                           uint32_t feature_flags);
 typedef struct JSDeterministicInitOptions {
     const uint8_t *manifest_bytes;
     size_t manifest_size;
@@ -398,6 +402,7 @@ typedef struct JSDeterministicInitOptions {
     const uint8_t *context_blob;
     size_t context_blob_size;
     uint64_t gas_limit;
+    uint32_t feature_flags;
 } JSDeterministicInitOptions;
 int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions *options);
 void JS_FreeContext(JSContext *s);

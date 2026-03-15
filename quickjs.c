@@ -2242,6 +2242,10 @@ void JS_FreeRuntime(JSRuntime *rt)
     /* don't remove the weak objects to avoid create new jobs with
        FinalizationRegistry */
     JS_RunGCInternal(rt, FALSE);
+    /* deterministic embed builds can install additional intrinsics after
+       context creation (for profile-gated compatibility). Run a final sweep
+       here to ensure gc_obj_list is drained before runtime teardown asserts. */
+    JS_RunGCInternal(rt, TRUE);
 
 #ifdef DUMP_LEAKS
     /* leaking objects */
@@ -2542,7 +2546,9 @@ static uint32_t js_wasm_host_call(JSContext *ctx, uint32_t fn_id, const uint8_t 
 }
 #endif
 
-int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
+int JS_NewDeterministicRuntimeWithFeatures(JSRuntime **out_rt,
+                                           JSContext **out_ctx,
+                                           uint32_t feature_flags)
 {
     JSRuntime *rt;
     JSContext *ctx;
@@ -2575,7 +2581,7 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
         return -1;
     }
 
-    if (js_deterministic_init_context(ctx)) {
+    if (js_deterministic_init_context(ctx, feature_flags)) {
         JS_FreeContext(ctx);
         JS_FreeRuntime(rt);
         return -1;
@@ -2584,6 +2590,11 @@ int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
     *out_rt = rt;
     *out_ctx = ctx;
     return 0;
+}
+
+int JS_NewDeterministicRuntime(JSRuntime **out_rt, JSContext **out_ctx)
+{
+    return JS_NewDeterministicRuntimeWithFeatures(out_rt, out_ctx, 0);
 }
 
 int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity)

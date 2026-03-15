@@ -29,7 +29,7 @@ void js_deterministic_set_manifest_state(JSContext *ctx,
                                          uint8_t *context_blob,
                                          size_t context_blob_size);
 
-int js_deterministic_init_context(JSContext *ctx);
+int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags);
 int js_deterministic_install_json(JSContext *ctx);
 
 int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity);
