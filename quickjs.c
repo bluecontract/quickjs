@@ -2286,7 +2286,9 @@ void JS_FreeRuntime(JSRuntime *rt)
             printf("Secondary object leaks: %d\n", count);
     }
 #endif
-    assert(list_empty(&rt->gc_obj_list));
+    if (!list_empty(&rt->gc_obj_list)) {
+        JS_RunGCInternal(rt, TRUE);
+    }
     assert(list_empty(&rt->weakref_list));
 
     /* free the classes */
@@ -2851,6 +2853,11 @@ static void js_free_modules(JSContext *ctx, JSFreeModuleEnum flag)
             JS_FreeValue(ctx, JS_MKPTR(JS_TAG_MODULE, m));
         }
     }
+}
+
+void JS_FreeContextLoadedModules(JSContext *ctx)
+{
+    js_free_modules(ctx, JS_FREE_MODULE_ALL);
 }
 
 JSContext *JS_DupContext(JSContext *ctx)

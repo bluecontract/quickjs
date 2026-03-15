@@ -1057,6 +1057,7 @@ void JS_SetModuleLoaderFunc2(JSRuntime *rt,
 JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m);
 JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m);
 JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m);
+void JS_FreeContextLoadedModules(JSContext *ctx);
 
 /* JS Job support */
 
