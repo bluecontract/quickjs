@@ -1042,6 +1042,105 @@ static int js_deterministic_disable_print(JSContext *ctx)
                                                    JS_DETERMINISTIC_DISABLED_PRINT);
 }
 
+static int js_deterministic_enable_stable_sort(JSContext *ctx)
+{
+    static const char *script =
+        "(function () {\n"
+        "  const hasOwn = Object.prototype.hasOwnProperty;\n"
+        "  const compareDefault = (left, right) => {\n"
+        "    if (left.value === undefined && right.value === undefined) {\n"
+        "      return left.index - right.index;\n"
+        "    }\n"
+        "    if (left.value === undefined) {\n"
+        "      return 1;\n"
+        "    }\n"
+        "    if (right.value === undefined) {\n"
+        "      return -1;\n"
+        "    }\n"
+        "    const leftString = String(left.value);\n"
+        "    const rightString = String(right.value);\n"
+        "    if (leftString < rightString) {\n"
+        "      return -1;\n"
+        "    }\n"
+        "    if (leftString > rightString) {\n"
+        "      return 1;\n"
+        "    }\n"
+        "    return left.index - right.index;\n"
+        "  };\n"
+        "  const compareWithCallback = (compareFn) => (left, right) => {\n"
+        "    const numberResult = Number(compareFn(left.value, right.value));\n"
+        "    if (numberResult < 0) {\n"
+        "      return -1;\n"
+        "    }\n"
+        "    if (numberResult > 0) {\n"
+        "      return 1;\n"
+        "    }\n"
+        "    return left.index - right.index;\n"
+        "  };\n"
+        "  const stableMergeSort = (records, compare) => {\n"
+        "    if (records.length <= 1) {\n"
+        "      return records;\n"
+        "    }\n"
+        "    const middle = records.length >> 1;\n"
+        "    const left = stableMergeSort(records.slice(0, middle), compare);\n"
+        "    const right = stableMergeSort(records.slice(middle), compare);\n"
+        "    const merged = [];\n"
+        "    let leftIndex = 0;\n"
+        "    let rightIndex = 0;\n"
+        "    while (leftIndex < left.length && rightIndex < right.length) {\n"
+        "      if (compare(left[leftIndex], right[rightIndex]) <= 0) {\n"
+        "        merged.push(left[leftIndex++]);\n"
+        "      } else {\n"
+        "        merged.push(right[rightIndex++]);\n"
+        "      }\n"
+        "    }\n"
+        "    while (leftIndex < left.length) {\n"
+        "      merged.push(left[leftIndex++]);\n"
+        "    }\n"
+        "    while (rightIndex < right.length) {\n"
+        "      merged.push(right[rightIndex++]);\n"
+        "    }\n"
+        "    return merged;\n"
+        "  };\n"
+        "  const stableSort = function(compareFn) {\n"
+        "    if (compareFn !== undefined && typeof compareFn !== 'function') {\n"
+        "      throw new TypeError('Array.prototype.sort compareFunction must be a function');\n"
+        "    }\n"
+        "    const target = Object(this);\n"
+        "    const length = target.length >>> 0;\n"
+        "    const records = [];\n"
+        "    for (let index = 0; index < length; index++) {\n"
+        "      if (hasOwn.call(target, index)) {\n"
+        "        records.push({ index, value: target[index] });\n"
+        "      }\n"
+        "    }\n"
+        "    const compare = compareFn ? compareWithCallback(compareFn) : compareDefault;\n"
+        "    const sorted = stableMergeSort(records, compare);\n"
+        "    for (let index = 0; index < length; index++) {\n"
+        "      delete target[index];\n"
+        "    }\n"
+        "    for (let index = 0; index < sorted.length; index++) {\n"
+        "      target[index] = sorted[index].value;\n"
+        "    }\n"
+        "    return target;\n"
+        "  };\n"
+        "  Object.defineProperty(Array.prototype, 'sort', {\n"
+        "    value: stableSort,\n"
+        "    writable: true,\n"
+        "    enumerable: false,\n"
+        "    configurable: true,\n"
+        "  });\n"
+        "})();\n";
+
+    JSValue eval_result = JS_Eval(ctx, script, strlen(script),
+                                  "<deterministic-stable-sort>",
+                                  JS_EVAL_TYPE_GLOBAL);
+    if (JS_IsException(eval_result))
+        return -1;
+    JS_FreeValue(ctx, eval_result);
+    return 0;
+}
+
 static int js_deterministic_disable_array_sort(JSContext *ctx)
 {
     JSValue global;
@@ -1143,7 +1242,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
     if (feature_flags &
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
           JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
-          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM)) {
+          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM |
+          JS_DETERMINISTIC_FEATURE_STABLE_SORT)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
@@ -1154,6 +1254,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
         (feature_flags & JS_DETERMINISTIC_FEATURE_PROMISE_JOBS) != 0;
     JS_BOOL console_shim_enabled =
         (feature_flags & JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM) != 0;
+    JS_BOOL stable_sort_enabled =
+        (feature_flags & JS_DETERMINISTIC_FEATURE_STABLE_SORT) != 0;
 
     if (JS_AddIntrinsicBaseObjects(ctx) ||
         JS_AddIntrinsicEval(ctx) ||
@@ -1174,7 +1276,8 @@ int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags)
                               : js_deterministic_disable_console(ctx)) ||
         js_deterministic_disable_print(ctx) ||
         js_deterministic_install_json(ctx) ||
-        js_deterministic_disable_array_sort(ctx) ||
+        (stable_sort_enabled ? js_deterministic_enable_stable_sort(ctx)
+                             : js_deterministic_disable_array_sort(ctx)) ||
         js_deterministic_disable_webassembly(ctx) ||
         js_deterministic_init_host(ctx)) {
         return -1;
@@ -1266,7 +1369,8 @@ int JS_InitDeterministicContext(JSContext *ctx, const JSDeterministicInitOptions
     if (options->feature_flags &
         ~(JS_DETERMINISTIC_FEATURE_REGEXP |
           JS_DETERMINISTIC_FEATURE_PROMISE_JOBS |
-          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM)) {
+          JS_DETERMINISTIC_FEATURE_CONSOLE_SHIM |
+          JS_DETERMINISTIC_FEATURE_STABLE_SORT)) {
         JS_ThrowTypeError(ctx, "unknown deterministic feature flags");
         return -1;
     }
