@@ -1176,6 +1176,35 @@ typedef struct JSGasChargeTapeData {
 #define JS_GAS_SITE_ARRAY_CALLBACK_BASE UINT32_C(3)
 #define JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT UINT32_C(4)
 
+typedef enum JSGasAllocationClass {
+    JS_GAS_ALLOC_CLASS_UNKNOWN = 0,
+    JS_GAS_ALLOC_CLASS_OBJECT_HEADER = 1,
+    JS_GAS_ALLOC_CLASS_PROPERTY_SLOTS = 2,
+    JS_GAS_ALLOC_CLASS_SHAPE = 3,
+    JS_GAS_ALLOC_CLASS_STRING = 4,
+    JS_GAS_ALLOC_CLASS_ARRAY_SLOTS = 5,
+    JS_GAS_ALLOC_CLASS_MODULE_RECORD = 6,
+    JS_GAS_ALLOC_CLASS_MODULE_ENTRIES = 7,
+    JS_GAS_ALLOC_CLASS_PROMISE_JOB = 8,
+    JS_GAS_ALLOC_CLASS_ARRAY_BUFFER_HEADER = 9,
+    JS_GAS_ALLOC_CLASS_TYPED_ARRAY_BACKING = 10,
+    JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD = 11,
+} JSGasAllocationClass;
+
+#define JS_GAS_CANON_OBJECT_HEADER_BYTES UINT64_C(64)
+#define JS_GAS_CANON_PROPERTY_SLOT_BYTES UINT64_C(16)
+#define JS_GAS_CANON_SHAPE_HEADER_BYTES UINT64_C(48)
+#define JS_GAS_CANON_SHAPE_PROPERTY_BYTES UINT64_C(12)
+#define JS_GAS_CANON_STRING_HEADER_BYTES UINT64_C(24)
+#define JS_GAS_CANON_ARRAY_SLOT_BYTES UINT64_C(8)
+#define JS_GAS_CANON_MODULE_RECORD_BYTES UINT64_C(128)
+#define JS_GAS_CANON_MODULE_ENTRY_BYTES UINT64_C(24)
+#define JS_GAS_CANON_PROMISE_JOB_BASE_BYTES UINT64_C(48)
+#define JS_GAS_CANON_PROMISE_JOB_ARG_BYTES UINT64_C(8)
+#define JS_GAS_CANON_ARRAY_BUFFER_HEADER_BYTES UINT64_C(48)
+#define JS_GAS_CANON_TYPED_ARRAY_BACKING_UNIT_BYTES UINT64_C(1)
+#define JS_GAS_CANON_TYPED_ARRAY_RECORD_BYTES UINT64_C(40)
+
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
 {
     BOOL enabled = trace->enabled;
@@ -1657,29 +1686,90 @@ static uint64_t js_gas_allocation_cost(size_t size)
     return JS_GAS_ALLOC_BASE + units;
 }
 
-static size_t js_det_normalize_allocation_size(JSRuntime *rt, size_t size)
+static uint64_t js_gas_mul_add_u64(uint64_t base, uint64_t units, uint64_t per_unit)
 {
-    if (!rt || !rt->deterministic_mode || size == 0)
-        return size;
-
-#if UINTPTR_MAX > 0xffffffff
-    {
-        size_t scaled_size;
-
-        if (size > (SIZE_MAX - 30) / 26)
-            return SIZE_MAX;
-        scaled_size = size * 26 + 30;
-        return scaled_size / 31;
-    }
-#else
-    return size;
-#endif
+    if (units == 0 || per_unit == 0)
+        return base;
+    if (units > (UINT64_MAX - base) / per_unit)
+        return UINT64_MAX;
+    return base + units * per_unit;
 }
 
-static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
+static size_t js_det_canonical_allocation_size(size_t requested_size,
+                                               JSGasAllocationClass alloc_class,
+                                               uint64_t logical_units)
+{
+    uint64_t canonical = 0;
+
+    switch (alloc_class) {
+    case JS_GAS_ALLOC_CLASS_OBJECT_HEADER:
+        canonical = js_gas_mul_add_u64(JS_GAS_CANON_OBJECT_HEADER_BYTES,
+                                       logical_units > 0 ? logical_units - 1 : 0,
+                                       JS_GAS_CANON_OBJECT_HEADER_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_PROPERTY_SLOTS:
+        canonical = js_gas_mul_add_u64(0, logical_units, JS_GAS_CANON_PROPERTY_SLOT_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_SHAPE:
+        {
+            uint64_t hash_units = logical_units >> 32;
+            uint64_t prop_units = logical_units & UINT64_C(0xffffffff);
+            canonical = js_gas_mul_add_u64(JS_GAS_CANON_SHAPE_HEADER_BYTES,
+                                           prop_units,
+                                           JS_GAS_CANON_SHAPE_PROPERTY_BYTES);
+            canonical = js_gas_mul_add_u64(canonical, hash_units, 4);
+        }
+        break;
+    case JS_GAS_ALLOC_CLASS_STRING:
+        canonical = js_gas_mul_add_u64(JS_GAS_CANON_STRING_HEADER_BYTES,
+                                       logical_units,
+                                       1);
+        break;
+    case JS_GAS_ALLOC_CLASS_ARRAY_SLOTS:
+        canonical = js_gas_mul_add_u64(0, logical_units, JS_GAS_CANON_ARRAY_SLOT_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_MODULE_RECORD:
+        canonical = JS_GAS_CANON_MODULE_RECORD_BYTES;
+        break;
+    case JS_GAS_ALLOC_CLASS_MODULE_ENTRIES:
+        canonical = js_gas_mul_add_u64(0, logical_units, JS_GAS_CANON_MODULE_ENTRY_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_PROMISE_JOB:
+        canonical = js_gas_mul_add_u64(JS_GAS_CANON_PROMISE_JOB_BASE_BYTES,
+                                       logical_units,
+                                       JS_GAS_CANON_PROMISE_JOB_ARG_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_ARRAY_BUFFER_HEADER:
+        canonical = JS_GAS_CANON_ARRAY_BUFFER_HEADER_BYTES;
+        break;
+    case JS_GAS_ALLOC_CLASS_TYPED_ARRAY_BACKING:
+        canonical = js_gas_mul_add_u64(0,
+                                       logical_units,
+                                       JS_GAS_CANON_TYPED_ARRAY_BACKING_UNIT_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD:
+        canonical = JS_GAS_CANON_TYPED_ARRAY_RECORD_BYTES;
+        break;
+    case JS_GAS_ALLOC_CLASS_UNKNOWN:
+    default:
+        canonical = requested_size;
+        break;
+    }
+
+    if (canonical > SIZE_MAX)
+        return SIZE_MAX;
+    return (size_t)canonical;
+}
+
+static int js_charge_gas_allocation_ctx_with_class(JSContext *ctx,
+                                                   size_t requested_size,
+                                                   JSGasAllocationClass alloc_class,
+                                                   uint64_t logical_units)
 {
     JSRuntime *rt = ctx->rt;
-    size_t charged_size = js_det_normalize_allocation_size(rt, size);
+    size_t charged_size = js_det_canonical_allocation_size(requested_size,
+                                                           alloc_class,
+                                                           logical_units);
     uint64_t gas_cost;
 
     if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
@@ -1699,8 +1789,16 @@ static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
                     charged_size))
         return -1;
 
-    js_gas_trace_record_allocation(ctx, size, charged_size, gas_cost);
+    js_gas_trace_record_allocation(ctx, requested_size, charged_size, gas_cost);
     return 0;
+}
+
+static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
+{
+    return js_charge_gas_allocation_ctx_with_class(ctx,
+                                                   size,
+                                                   JS_GAS_ALLOC_CLASS_UNKNOWN,
+                                                   size);
 }
 
 static size_t js_malloc_usable_size_unknown(const void *ptr)
@@ -1741,7 +1839,10 @@ void *js_mallocz_rt(JSRuntime *rt, size_t size)
 void *js_malloc(JSContext *ctx, size_t size)
 {
     void *ptr;
-    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             JS_GAS_ALLOC_CLASS_UNKNOWN,
+                                                             size))
         return NULL;
     ptr = js_malloc_rt(ctx->rt, size);
     if (unlikely(!ptr)) {
@@ -1756,7 +1857,10 @@ void *js_malloc(JSContext *ctx, size_t size)
 void *js_mallocz(JSContext *ctx, size_t size)
 {
     void *ptr;
-    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             JS_GAS_ALLOC_CLASS_UNKNOWN,
+                                                             size))
         return NULL;
     ptr = js_mallocz_rt(ctx->rt, size);
     if (unlikely(!ptr)) {
@@ -1776,7 +1880,10 @@ void js_free(JSContext *ctx, void *ptr)
 void *js_realloc(JSContext *ctx, void *ptr, size_t size)
 {
     void *ret;
-    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             JS_GAS_ALLOC_CLASS_UNKNOWN,
+                                                             size))
         return NULL;
     ret = js_realloc_rt(ctx->rt, ptr, size);
     if (unlikely(!ret && size != 0)) {
@@ -1791,7 +1898,58 @@ void *js_realloc(JSContext *ctx, void *ptr, size_t size)
 void *js_realloc2(JSContext *ctx, void *ptr, size_t size, size_t *pslack)
 {
     void *ret;
-    if (size != 0 && js_charge_gas_allocation_ctx(ctx, size))
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             JS_GAS_ALLOC_CLASS_UNKNOWN,
+                                                             size))
+        return NULL;
+    ret = js_realloc_rt(ctx->rt, ptr, size);
+    if (unlikely(!ret && size != 0)) {
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
+        return NULL;
+    }
+    if (pslack) {
+        size_t new_size = js_malloc_usable_size_rt(ctx->rt, ret);
+        *pslack = (new_size > size) ? new_size - size : 0;
+    }
+    return ret;
+}
+
+/* Throw out of memory in case of error */
+static void *js_malloc_with_class(JSContext *ctx,
+                                  size_t size,
+                                  JSGasAllocationClass alloc_class,
+                                  uint64_t logical_units,
+                                  BOOL zero_init)
+{
+    void *ptr;
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             alloc_class,
+                                                             logical_units))
+        return NULL;
+    ptr = zero_init ? js_mallocz_rt(ctx->rt, size) : js_malloc_rt(ctx->rt, size);
+    if (unlikely(!ptr && size != 0)) {
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
+        return NULL;
+    }
+    return ptr;
+}
+
+static void *js_realloc2_with_class(JSContext *ctx,
+                                    void *ptr,
+                                    size_t size,
+                                    size_t *pslack,
+                                    JSGasAllocationClass alloc_class,
+                                    uint64_t logical_units)
+{
+    void *ret;
+    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
+                                                             size,
+                                                             alloc_class,
+                                                             logical_units))
         return NULL;
     ret = js_realloc_rt(ctx->rt, ptr, size);
     if (unlikely(!ret && size != 0)) {
@@ -2204,7 +2362,11 @@ int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
     JSJobEntry *e;
     int i;
 
-    e = js_malloc(ctx, sizeof(*e) + argc * sizeof(JSValue));
+    e = js_malloc_with_class(ctx,
+                             sizeof(*e) + argc * sizeof(JSValue),
+                             JS_GAS_ALLOC_CLASS_PROMISE_JOB,
+                             (uint64_t)max_int(argc, 0),
+                             FALSE);
     if (!e)
         return -1;
     e->realm = JS_DupContext(ctx);
@@ -2302,8 +2464,12 @@ static JSString *js_alloc_string(JSContext *ctx, int max_len, int is_wide_char)
     JSString *p;
     size_t alloc_size = sizeof(JSString) +
                         (((size_t)max_len << is_wide_char) + 1 - is_wide_char);
+    uint64_t payload_units = (uint64_t)max_len << is_wide_char;
 
-    if (js_charge_gas_allocation_ctx(ctx, alloc_size))
+    if (js_charge_gas_allocation_ctx_with_class(ctx,
+                                                alloc_size,
+                                                JS_GAS_ALLOC_CLASS_STRING,
+                                                payload_units))
         return NULL;
     p = js_alloc_string_rt(ctx->rt, max_len, is_wide_char);
     if (unlikely(!p)) {
@@ -5621,7 +5787,12 @@ static inline JSShape *js_new_shape_nohash(JSContext *ctx, JSObject *proto,
     void *sh_alloc;
     JSShape *sh;
 
-    sh_alloc = js_malloc(ctx, get_shape_size(hash_size, prop_size));
+    sh_alloc = js_malloc_with_class(
+        ctx,
+        get_shape_size(hash_size, prop_size),
+        JS_GAS_ALLOC_CLASS_SHAPE,
+        ((uint64_t)(uint32_t)hash_size << 32) | (uint32_t)prop_size,
+        FALSE);
     if (!sh_alloc)
         return NULL;
     sh = get_shape_from_alloc(sh_alloc, hash_size);
@@ -5681,7 +5852,12 @@ static JSShape *js_clone_shape(JSContext *ctx, JSShape *sh1)
 
     hash_size = sh1->prop_hash_mask + 1;
     size = get_shape_size(hash_size, sh1->prop_size);
-    sh_alloc = js_malloc(ctx, size);
+    sh_alloc = js_malloc_with_class(
+        ctx,
+        size,
+        JS_GAS_ALLOC_CLASS_SHAPE,
+        ((uint64_t)(uint32_t)hash_size << 32) | (uint32_t)sh1->prop_size,
+        FALSE);
     if (!sh_alloc)
         return NULL;
     sh_alloc1 = get_alloc_from_shape(sh1);
@@ -6017,7 +6193,11 @@ static JSValue JS_NewObjectFromShape(JSContext *ctx, JSShape *sh, JSClassID clas
     int i;
     
     js_trigger_gc(ctx->rt, sizeof(JSObject));
-    p = js_malloc(ctx, sizeof(JSObject));
+    p = js_malloc_with_class(ctx,
+                             sizeof(JSObject),
+                             JS_GAS_ALLOC_CLASS_OBJECT_HEADER,
+                             1,
+                             FALSE);
     if (unlikely(!p))
         goto fail;
     p->class_id = class_id;
@@ -6033,7 +6213,11 @@ static JSValue JS_NewObjectFromShape(JSContext *ctx, JSShape *sh, JSClassID clas
     p->weakref_count = 0;
     p->u.opaque = NULL;
     p->shape = sh;
-    p->prop = js_malloc(ctx, sizeof(JSProperty) * sh->prop_size);
+    p->prop = js_malloc_with_class(ctx,
+                                   sizeof(JSProperty) * sh->prop_size,
+                                   JS_GAS_ALLOC_CLASS_PROPERTY_SLOTS,
+                                   sh->prop_size,
+                                   FALSE);
     if (unlikely(!p->prop)) {
         js_free(ctx, p);
     fail:
@@ -9928,7 +10112,12 @@ static int expand_fast_array(JSContext *ctx, JSObject *p, uint32_t new_len)
     JSValue *new_array_prop;
     /* XXX: potential arithmetic overflow */
     new_size = max_int(new_len, p->u.array.u1.size * 3 / 2);
-    new_array_prop = js_realloc2(ctx, p->u.array.u.values, sizeof(JSValue) * new_size, &slack);
+    new_array_prop = js_realloc2_with_class(ctx,
+                                            p->u.array.u.values,
+                                            sizeof(JSValue) * new_size,
+                                            &slack,
+                                            JS_GAS_ALLOC_CLASS_ARRAY_SLOTS,
+                                            new_size);
     if (!new_array_prop)
         return -1;
     new_size += slack / sizeof(*new_array_prop);
@@ -29919,7 +30108,11 @@ fail:
 static JSModuleDef *js_new_module_def(JSContext *ctx, JSAtom name)
 {
     JSModuleDef *m;
-    m = js_mallocz(ctx, sizeof(*m));
+    m = js_malloc_with_class(ctx,
+                             sizeof(*m),
+                             JS_GAS_ALLOC_CLASS_MODULE_RECORD,
+                             1,
+                             TRUE);
     if (!m) {
         JS_FreeAtom(ctx, name);
         return NULL;
@@ -39210,7 +39403,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
         goto fail;
     if (m->req_module_entries_count != 0) {
         m->req_module_entries_size = m->req_module_entries_count;
-        m->req_module_entries = js_mallocz(ctx, sizeof(m->req_module_entries[0]) * m->req_module_entries_size);
+        m->req_module_entries = js_malloc_with_class(
+            ctx,
+            sizeof(m->req_module_entries[0]) * m->req_module_entries_size,
+            JS_GAS_ALLOC_CLASS_MODULE_ENTRIES,
+            m->req_module_entries_size,
+            TRUE);
         if (!m->req_module_entries)
             goto fail;
         for(i = 0; i < m->req_module_entries_count; i++) {
@@ -39229,7 +39427,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
         goto fail;
     if (m->export_entries_count != 0) {
         m->export_entries_size = m->export_entries_count;
-        m->export_entries = js_mallocz(ctx, sizeof(m->export_entries[0]) * m->export_entries_size);
+        m->export_entries = js_malloc_with_class(
+            ctx,
+            sizeof(m->export_entries[0]) * m->export_entries_size,
+            JS_GAS_ALLOC_CLASS_MODULE_ENTRIES,
+            m->export_entries_size,
+            TRUE);
         if (!m->export_entries)
             goto fail;
         for(i = 0; i < m->export_entries_count; i++) {
@@ -39255,7 +39458,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
         goto fail;
     if (m->star_export_entries_count != 0) {
         m->star_export_entries_size = m->star_export_entries_count;
-        m->star_export_entries = js_mallocz(ctx, sizeof(m->star_export_entries[0]) * m->star_export_entries_size);
+        m->star_export_entries = js_malloc_with_class(
+            ctx,
+            sizeof(m->star_export_entries[0]) * m->star_export_entries_size,
+            JS_GAS_ALLOC_CLASS_MODULE_ENTRIES,
+            m->star_export_entries_size,
+            TRUE);
         if (!m->star_export_entries)
             goto fail;
         for(i = 0; i < m->star_export_entries_count; i++) {
@@ -39269,7 +39477,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
         goto fail;
     if (m->import_entries_count != 0) {
         m->import_entries_size = m->import_entries_count;
-        m->import_entries = js_mallocz(ctx, sizeof(m->import_entries[0]) * m->import_entries_size);
+        m->import_entries = js_malloc_with_class(
+            ctx,
+            sizeof(m->import_entries[0]) * m->import_entries_size,
+            JS_GAS_ALLOC_CLASS_MODULE_ENTRIES,
+            m->import_entries_size,
+            TRUE);
         if (!m->import_entries)
             goto fail;
         for(i = 0; i < m->import_entries_count; i++) {
@@ -56630,7 +56843,11 @@ static JSValue js_array_buffer_constructor3(JSContext *ctx,
         JS_ThrowRangeError(ctx, "invalid max array buffer length");
         goto fail;
     }
-    abuf = js_malloc(ctx, sizeof(*abuf));
+    abuf = js_malloc_with_class(ctx,
+                                sizeof(*abuf),
+                                JS_GAS_ALLOC_CLASS_ARRAY_BUFFER_HEADER,
+                                1,
+                                FALSE);
     if (!abuf)
         goto fail;
     abuf->byte_length = len;
@@ -56648,7 +56865,12 @@ static JSValue js_array_buffer_constructor3(JSContext *ctx,
             memset(abuf->data, 0, sab_alloc_len);
         } else {
             /* the allocation must be done after the object creation */
-            abuf->data = js_mallocz(ctx, max_int(len, 1));
+            abuf->data = js_malloc_with_class(
+                ctx,
+                max_int(len, 1),
+                JS_GAS_ALLOC_CLASS_TYPED_ARRAY_BACKING,
+                max_int(len, 1),
+                TRUE);
             if (!abuf->data)
                 goto fail;
         }
@@ -58883,7 +59105,11 @@ static int typed_array_init(JSContext *ctx, JSValueConst obj,
 
     p = JS_VALUE_GET_OBJ(obj);
     size_log2 = typed_array_size_log2(p->class_id);
-    ta = js_malloc(ctx, sizeof(*ta));
+    ta = js_malloc_with_class(ctx,
+                              sizeof(*ta),
+                              JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD,
+                              1,
+                              FALSE);
     if (!ta) {
         JS_FreeValue(ctx, buffer);
         return -1;
