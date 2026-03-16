@@ -1201,7 +1201,7 @@ typedef enum JSGasAllocationClass {
 #define JS_GAS_CANON_PROPERTY_SLOT_BYTES UINT64_C(16)
 #define JS_GAS_CANON_SHAPE_HEADER_BYTES UINT64_C(48)
 #define JS_GAS_CANON_SHAPE_PROPERTY_BYTES UINT64_C(12)
-#define JS_GAS_CANON_STRING_HEADER_BYTES UINT64_C(24)
+#define JS_GAS_CANON_STRING_HEADER_BYTES UINT64_C(0)
 #define JS_GAS_CANON_ARRAY_SLOT_BYTES UINT64_C(8)
 #define JS_GAS_CANON_MODULE_RECORD_BYTES UINT64_C(128)
 #define JS_GAS_CANON_MODULE_ENTRY_BYTES UINT64_C(24)
@@ -1733,9 +1733,7 @@ static size_t js_det_canonical_allocation_size(size_t requested_size,
         }
         break;
     case JS_GAS_ALLOC_CLASS_STRING:
-        canonical = js_gas_mul_add_u64(JS_GAS_CANON_STRING_HEADER_BYTES,
-                                       logical_units,
-                                       1);
+        canonical = JS_GAS_CANON_STRING_HEADER_BYTES;
         break;
     case JS_GAS_ALLOC_CLASS_ARRAY_SLOTS:
         canonical = js_gas_mul_add_u64(0, logical_units, JS_GAS_CANON_ARRAY_SLOT_BYTES);
@@ -1817,6 +1815,12 @@ static int js_charge_gas_allocation_ctx_with_class(JSContext *ctx,
         rt->det_gc_alloc_bytes += charged_size;
         if (rt->det_gc_alloc_bytes >= JS_DET_GC_THRESHOLD_BYTES)
             rt->det_gc_pending = TRUE;
+    }
+
+    if (rt->deterministic_mode &&
+        alloc_class == JS_GAS_ALLOC_CLASS_UNKNOWN) {
+        js_gas_trace_record_allocation(ctx, requested_size, charged_size, 0);
+        return 0;
     }
 
     gas_cost = js_gas_allocation_cost(charged_size);
@@ -1984,10 +1988,18 @@ static void *js_realloc2_with_class(JSContext *ctx,
                                     uint64_t logical_units)
 {
     void *ret;
-    if (size != 0 && js_charge_gas_allocation_ctx_with_class(ctx,
-                                                             size,
-                                                             alloc_class,
-                                                             logical_units))
+    BOOL charge_required = (size != 0);
+    if (charge_required &&
+        ctx->rt->deterministic_mode &&
+        ptr != NULL &&
+        alloc_class == JS_GAS_ALLOC_CLASS_UNKNOWN) {
+        charge_required = FALSE;
+    }
+    if (charge_required &&
+        js_charge_gas_allocation_ctx_with_class(ctx,
+                                                size,
+                                                alloc_class,
+                                                logical_units))
         return NULL;
     ret = js_realloc_rt(ctx->rt, ptr, size);
     if (unlikely(!ret && size != 0)) {
@@ -4649,14 +4661,18 @@ static no_inline int string_buffer_widen(StringBuffer *s, int size)
     if (s->error_status)
         return -1;
 
-    str = js_realloc2_with_class(s->ctx,
-                                 s->str,
-                                 sizeof(JSString) + (size << 1),
-                                 &slack,
-                                 JS_GAS_ALLOC_CLASS_STRING,
-                                 (uint64_t)size << 1);
-    if (!str)
+    str = js_realloc_rt(s->ctx->rt, s->str, sizeof(JSString) + (size << 1));
+    if (!str) {
+        if (JS_IsUninitialized(s->ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(s->ctx);
         return string_buffer_set_error(s);
+    }
+    {
+        size_t new_size = js_malloc_usable_size_rt(s->ctx->rt, str);
+        slack = (new_size > (sizeof(JSString) + (size << 1)))
+                    ? (new_size - (sizeof(JSString) + (size << 1)))
+                    : 0;
+    }
     size += slack >> 1;
     for(i = s->len; i-- > 0;) {
         str->u.str16[i] = str->u.str8[i];
@@ -4685,14 +4701,16 @@ static no_inline int string_buffer_realloc(StringBuffer *s, int new_len, int c)
         return string_buffer_widen(s, new_size);
     }
     new_size_bytes = sizeof(JSString) + (new_size << s->is_wide_char) + 1 - s->is_wide_char;
-    new_str = js_realloc2_with_class(s->ctx,
-                                     s->str,
-                                     new_size_bytes,
-                                     &slack,
-                                     JS_GAS_ALLOC_CLASS_STRING,
-                                     (uint64_t)new_size << s->is_wide_char);
-    if (!new_str)
+    new_str = js_realloc_rt(s->ctx->rt, s->str, new_size_bytes);
+    if (!new_str) {
+        if (JS_IsUninitialized(s->ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(s->ctx);
         return string_buffer_set_error(s);
+    }
+    {
+        size_t alloc_size = js_malloc_usable_size_rt(s->ctx->rt, new_str);
+        slack = alloc_size > new_size_bytes ? alloc_size - new_size_bytes : 0;
+    }
     new_size = min_int(new_size + (slack >> s->is_wide_char), JS_STRING_LEN_MAX);
     s->size = new_size;
     s->str = new_str;
@@ -10165,14 +10183,19 @@ static int expand_fast_array(JSContext *ctx, JSObject *p, uint32_t new_len)
     JSValue *new_array_prop;
     /* XXX: potential arithmetic overflow */
     new_size = max_int(new_len, p->u.array.u1.size * 3 / 2);
-    new_array_prop = js_realloc2_with_class(ctx,
-                                            p->u.array.u.values,
-                                            sizeof(JSValue) * new_size,
-                                            &slack,
-                                            JS_GAS_ALLOC_CLASS_ARRAY_SLOTS,
-                                            new_size);
-    if (!new_array_prop)
+    new_array_prop = js_realloc_rt(ctx->rt,
+                                   p->u.array.u.values,
+                                   sizeof(JSValue) * new_size);
+    if (!new_array_prop) {
+        if (JS_IsUninitialized(ctx->rt->current_exception))
+            JS_ThrowOutOfMemory(ctx);
         return -1;
+    }
+    {
+        size_t alloc_size = js_malloc_usable_size_rt(ctx->rt, new_array_prop);
+        size_t requested_size = sizeof(JSValue) * new_size;
+        slack = alloc_size > requested_size ? alloc_size - requested_size : 0;
+    }
     new_size += slack / sizeof(*new_array_prop);
     p->u.array.u.values = new_array_prop;
     p->u.array.u1.size = new_size;
@@ -49253,27 +49276,28 @@ static int value_buffer_append(ValueBuffer *b, JSValue val)
         JSValue *new_arr;
 
         if (b->arr == b->def) {
-            new_arr = js_realloc2_with_class(b->ctx,
-                                             NULL,
-                                             sizeof(*b->arr) * new_size,
-                                             &slack,
-                                             JS_GAS_ALLOC_CLASS_ARRAY_SLOTS,
-                                             new_size);
+            new_arr = js_realloc_rt(b->ctx->rt,
+                                    NULL,
+                                    sizeof(*b->arr) * new_size);
             if (new_arr)
                 memcpy(new_arr, b->def, sizeof b->def);
         } else {
-            new_arr = js_realloc2_with_class(b->ctx,
-                                             b->arr,
-                                             sizeof(*b->arr) * new_size,
-                                             &slack,
-                                             JS_GAS_ALLOC_CLASS_ARRAY_SLOTS,
-                                             new_size);
+            new_arr = js_realloc_rt(b->ctx->rt,
+                                    b->arr,
+                                    sizeof(*b->arr) * new_size);
         }
         if (!new_arr) {
+            if (JS_IsUninitialized(b->ctx->rt->current_exception))
+                JS_ThrowOutOfMemory(b->ctx);
             value_buffer_free(b);
             JS_FreeValue(b->ctx, val);
             b->error_status = -1;
             return -1;
+        }
+        {
+            size_t alloc_size = js_malloc_usable_size_rt(b->ctx->rt, new_arr);
+            size_t requested_size = sizeof(*b->arr) * new_size;
+            slack = alloc_size > requested_size ? alloc_size - requested_size : 0;
         }
         new_size += slack / sizeof(*new_arr);
         b->arr = new_arr;
