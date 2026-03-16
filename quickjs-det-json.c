@@ -17,6 +17,9 @@
 #define JS_GAS_JSON_STRINGIFY_OUTPUT_BYTE 1
 #define JS_GAS_JSON_STRINGIFY_SORT_COMPARISON 1
 
+#define JS_GAS_SITE_JSON_PARSE UINT32_C(3001)
+#define JS_GAS_SITE_JSON_STRINGIFY UINT32_C(3002)
+
 typedef struct JSDetJSONStringifyKeyEntry {
     JSAtom atom;
     uint8_t *encoded_key;
@@ -67,7 +70,11 @@ static int js_det_json_parse_charge(JSContext *ctx,
                                     uint64_t object_entry_count,
                                     uint64_t array_element_count)
 {
-    if (JS_UseGas(ctx, gas_cost) != 0)
+    if (JS_UseGasAt(ctx,
+                    gas_cost,
+                    JS_GAS_SITE_JSON_PARSE,
+                    JS_GAS_CHARGE_KIND_JSON_PARSE,
+                    value_count + object_entry_count + array_element_count) != 0)
         return -1;
     js_gas_trace_record_json_parse(ctx, gas_cost, count_call, input_bytes,
                                    value_count, object_entry_count,
@@ -84,7 +91,11 @@ static int js_det_json_stringify_charge(JSContext *ctx,
                                         uint64_t array_element_count,
                                         uint64_t sort_comparison_count)
 {
-    if (JS_UseGas(ctx, gas_cost) != 0)
+    if (JS_UseGasAt(ctx,
+                    gas_cost,
+                    JS_GAS_SITE_JSON_STRINGIFY,
+                    JS_GAS_CHARGE_KIND_JSON_STRINGIFY,
+                    value_count + object_entry_count + array_element_count) != 0)
         return -1;
     js_gas_trace_record_json_stringify(ctx, gas_cost, count_call, output_bytes,
                                        value_count, object_entry_count,

@@ -448,6 +448,41 @@ typedef struct JSGasTrace {
 int JS_EnableGasTrace(JSContext *ctx, int enabled);
 int JS_ResetGasTrace(JSContext *ctx);
 int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace);
+
+typedef enum JSGasChargeKind {
+    JS_GAS_CHARGE_KIND_UNKNOWN = 0,
+    JS_GAS_CHARGE_KIND_OPCODE = 1,
+    JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_BASE = 2,
+    JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_PER_ELEMENT = 3,
+    JS_GAS_CHARGE_KIND_ALLOCATION = 4,
+    JS_GAS_CHARGE_KIND_JSON_PARSE = 5,
+    JS_GAS_CHARGE_KIND_JSON_STRINGIFY = 6,
+    JS_GAS_CHARGE_KIND_HOST_CALL_PRE = 7,
+    JS_GAS_CHARGE_KIND_HOST_CALL_POST = 8,
+} JSGasChargeKind;
+
+#define JS_GAS_CHARGE_FLAG_APPLIED (1u << 0)
+#define JS_GAS_CHARGE_TAPE_MAX_CAPACITY 8192
+
+typedef struct JSGasChargeRecord {
+    uint32_t site_id;
+    uint16_t kind;
+    uint16_t flags;
+    uint64_t amount;
+    uint64_t logical_units;
+    uint64_t gas_before;
+    uint64_t gas_after;
+} JSGasChargeRecord;
+
+int JS_EnableGasChargeTape(JSContext *ctx, size_t capacity);
+int JS_ResetGasChargeTape(JSContext *ctx);
+size_t JS_GetGasChargeTapeLength(JSContext *ctx);
+int JS_ReadGasChargeTape(JSContext *ctx, JSGasChargeRecord *out_records, size_t max_records, size_t *out_count);
+int JS_UseGasAt(JSContext *ctx,
+                uint64_t amount,
+                uint32_t site_id,
+                uint16_t kind,
+                uint64_t logical_units);
 int JS_UseGas(JSContext *ctx, uint64_t amount);
 
 #define JS_HOST_CALL_TRANSPORT_ERROR UINT32_C(0xffffffff)

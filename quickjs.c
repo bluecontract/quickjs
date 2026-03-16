@@ -517,6 +517,7 @@ struct JSContext {
     uint32_t host_call_resp_capacity;
 
     JSGasTraceData *gas_trace;
+    struct JSGasChargeTapeData *gas_charge_tape;
     BOOL deterministic_mode;
 };
 
@@ -1161,6 +1162,19 @@ struct JSGasTraceData {
     uint64_t host_call_post_gas;
 };
 
+typedef struct JSGasChargeTapeData {
+    BOOL enabled;
+    size_t capacity;
+    size_t count;
+    size_t head;
+    JSGasChargeRecord *records;
+} JSGasChargeTapeData;
+
+#define JS_GAS_SITE_OPCODE_DISPATCH UINT32_C(1)
+#define JS_GAS_SITE_ALLOCATION UINT32_C(2)
+#define JS_GAS_SITE_ARRAY_CALLBACK_BASE UINT32_C(3)
+#define JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT UINT32_C(4)
+
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
 {
     BOOL enabled = trace->enabled;
@@ -1281,6 +1295,50 @@ void js_gas_trace_record_host_call_post(JSContext *ctx, uint64_t gas_cost)
 
     trace->host_call_post_count++;
     trace->host_call_post_gas += gas_cost;
+}
+
+static JSGasChargeTapeData *js_gas_charge_tape_or_null(JSContext *ctx)
+{
+    if (!ctx || !ctx->gas_charge_tape || !ctx->gas_charge_tape->enabled)
+        return NULL;
+    return ctx->gas_charge_tape;
+}
+
+static JSGasChargeTapeData *js_gas_charge_tape_ensure(JSContext *ctx)
+{
+    if (!ctx->gas_charge_tape) {
+        ctx->gas_charge_tape = js_mallocz_rt(ctx->rt, sizeof(JSGasChargeTapeData));
+    }
+    return ctx->gas_charge_tape;
+}
+
+static void js_gas_charge_tape_append(JSContext *ctx,
+                                      uint32_t site_id,
+                                      uint16_t kind,
+                                      uint16_t flags,
+                                      uint64_t amount,
+                                      uint64_t logical_units,
+                                      uint64_t gas_before,
+                                      uint64_t gas_after)
+{
+    JSGasChargeTapeData *tape = js_gas_charge_tape_or_null(ctx);
+    size_t idx;
+
+    if (!tape || tape->capacity == 0 || !tape->records)
+        return;
+
+    idx = tape->head;
+    tape->records[idx].site_id = site_id;
+    tape->records[idx].kind = kind;
+    tape->records[idx].flags = flags;
+    tape->records[idx].amount = amount;
+    tape->records[idx].logical_units = logical_units;
+    tape->records[idx].gas_before = gas_before;
+    tape->records[idx].gas_after = gas_after;
+
+    if (tape->count < tape->capacity)
+        tape->count++;
+    tape->head = (tape->head + 1) % tape->capacity;
 }
 
 static int JS_InitAtoms(JSRuntime *rt);
@@ -1629,7 +1687,11 @@ static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
     }
 
     gas_cost = js_gas_allocation_cost(metered_size);
-    if (JS_UseGas(ctx, gas_cost))
+    if (JS_UseGasAt(ctx,
+                    gas_cost,
+                    JS_GAS_SITE_ALLOCATION,
+                    JS_GAS_CHARGE_KIND_ALLOCATION,
+                    metered_size))
         return -1;
 
     js_gas_trace_record_allocation(ctx, metered_size, gas_cost);
@@ -2825,19 +2887,122 @@ int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace)
     return 0;
 }
 
-int JS_UseGas(JSContext *ctx, uint64_t amount)
+int JS_EnableGasChargeTape(JSContext *ctx, size_t capacity)
 {
+    JSGasChargeTapeData *tape;
+    JSGasChargeRecord *records = NULL;
+
+    if (!ctx)
+        return -1;
+    if (capacity > JS_GAS_CHARGE_TAPE_MAX_CAPACITY) {
+        JS_ThrowTypeError(ctx, "gas charge tape capacity exceeds max (%u)", JS_GAS_CHARGE_TAPE_MAX_CAPACITY);
+        return -1;
+    }
+
+    tape = js_gas_charge_tape_ensure(ctx);
+    if (!tape)
+        return -1;
+
+    if (capacity > 0) {
+        records = js_mallocz_rt(ctx->rt, sizeof(JSGasChargeRecord) * capacity);
+        if (!records)
+            return -1;
+    }
+
+    if (tape->records)
+        js_free_rt(ctx->rt, tape->records);
+    tape->records = records;
+    tape->capacity = capacity;
+    tape->count = 0;
+    tape->head = 0;
+    tape->enabled = capacity > 0 ? TRUE : FALSE;
+    return 0;
+}
+
+int JS_ResetGasChargeTape(JSContext *ctx)
+{
+    JSGasChargeTapeData *tape;
+
+    if (!ctx || !ctx->gas_charge_tape)
+        return -1;
+
+    tape = ctx->gas_charge_tape;
+    if (tape->records && tape->capacity > 0)
+        memset(tape->records, 0, sizeof(JSGasChargeRecord) * tape->capacity);
+    tape->count = 0;
+    tape->head = 0;
+    return 0;
+}
+
+size_t JS_GetGasChargeTapeLength(JSContext *ctx)
+{
+    if (!ctx || !ctx->gas_charge_tape)
+        return 0;
+    return ctx->gas_charge_tape->count;
+}
+
+int JS_ReadGasChargeTape(JSContext *ctx,
+                         JSGasChargeRecord *out_records,
+                         size_t max_records,
+                         size_t *out_count)
+{
+    JSGasChargeTapeData *tape;
+    size_t to_copy, start, i;
+
+    if (!ctx || !ctx->gas_charge_tape)
+        return -1;
+
+    tape = ctx->gas_charge_tape;
+    if (out_count)
+        *out_count = 0;
+
+    if (!out_records || max_records == 0 || tape->count == 0 || tape->capacity == 0 || !tape->records)
+        return 0;
+
+    to_copy = tape->count < max_records ? tape->count : max_records;
+    if (out_count)
+        *out_count = to_copy;
+    start = (tape->head + tape->capacity - tape->count) % tape->capacity;
+    for (i = 0; i < to_copy; i++) {
+        size_t idx = (start + i) % tape->capacity;
+        out_records[i] = tape->records[idx];
+    }
+    return 0;
+}
+
+int JS_UseGasAt(JSContext *ctx,
+                uint64_t amount,
+                uint32_t site_id,
+                uint16_t kind,
+                uint64_t logical_units)
+{
+    uint64_t gas_before;
+    uint64_t gas_after;
+    uint16_t flags = 0;
+
     if (ctx->gas_limit == JS_GAS_UNLIMITED)
         return 0;
     if (amount == 0)
         return 0;
+
+    gas_before = ctx->gas_remaining;
     if (amount > ctx->gas_remaining) {
         ctx->gas_remaining = 0;
+        gas_after = 0;
+        js_gas_charge_tape_append(ctx, site_id, kind, flags, amount, logical_units, gas_before, gas_after);
         JS_ThrowOutOfGas(ctx);
         return -1;
     }
     ctx->gas_remaining -= amount;
+    gas_after = ctx->gas_remaining;
+    flags |= JS_GAS_CHARGE_FLAG_APPLIED;
+    js_gas_charge_tape_append(ctx, site_id, kind, flags, amount, logical_units, gas_before, gas_after);
     return 0;
+}
+
+int JS_UseGas(JSContext *ctx, uint64_t amount)
+{
+    return JS_UseGasAt(ctx, amount, 0, JS_GAS_CHARGE_KIND_UNKNOWN, 0);
 }
 
 int JS_RunGCCheckpoint(JSContext *ctx)
@@ -3042,6 +3207,11 @@ void JS_FreeContext(JSContext *ctx)
     remove_gc_object(&ctx->header);
     if (ctx->gas_trace)
         js_free_rt(ctx->rt, ctx->gas_trace);
+    if (ctx->gas_charge_tape) {
+        if (ctx->gas_charge_tape->records)
+            js_free_rt(ctx->rt, ctx->gas_charge_tape->records);
+        js_free_rt(ctx->rt, ctx->gas_charge_tape);
+    }
     js_free_rt(ctx->rt, ctx);
 }
 
@@ -18122,7 +18292,11 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         JSValue *call_argv;
         opcode = *pc++;
         uint16_t gas_cost = js_get_opcode_gas_cost(opcode);
-        if (unlikely(JS_UseGas(ctx, gas_cost) != 0))
+        if (unlikely(JS_UseGasAt(ctx,
+                                 gas_cost,
+                                 JS_GAS_SITE_OPCODE_DISPATCH,
+                                 JS_GAS_CHARGE_KIND_OPCODE,
+                                 opcode) != 0))
             goto exception;
         js_gas_trace_record_opcode(ctx, opcode, gas_cost);
 
@@ -42185,7 +42359,11 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     obj = JS_UNDEFINED;
     ret = JS_UNDEFINED;
     val = JS_UNDEFINED;
-    if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
+    if (unlikely(JS_UseGasAt(ctx,
+                             JS_GAS_ARRAY_CB_BASE,
+                             JS_GAS_SITE_ARRAY_CALLBACK_BASE,
+                             JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_BASE,
+                             1) != 0))
         goto exception;
     js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_BASE, FALSE);
     if (special & special_TA) {
@@ -42242,7 +42420,11 @@ static JSValue js_array_every(JSContext *ctx, JSValueConst this_val,
     n = 0;
 
     for(k = 0; k < len; k++) {
-        if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+        if (unlikely(JS_UseGasAt(ctx,
+                                 JS_GAS_ARRAY_CB_PER_ELEMENT,
+                                 JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT,
+                                 JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_PER_ELEMENT,
+                                 1) != 0))
             goto exception;
         js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
         if (special & special_TA) {
@@ -42349,7 +42531,11 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
     obj = JS_UNDEFINED;
     acc = JS_UNDEFINED;
     val = JS_UNDEFINED;
-    if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_BASE) != 0))
+    if (unlikely(JS_UseGasAt(ctx,
+                             JS_GAS_ARRAY_CB_BASE,
+                             JS_GAS_SITE_ARRAY_CALLBACK_BASE,
+                             JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_BASE,
+                             1) != 0))
         goto exception;
     js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_BASE, FALSE);
     if (special & special_TA) {
@@ -42372,7 +42558,11 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
         acc = JS_DupValue(ctx, argv[1]);
     } else {
         for(;;) {
-            if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+            if (unlikely(JS_UseGasAt(ctx,
+                                     JS_GAS_ARRAY_CB_PER_ELEMENT,
+                                     JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT,
+                                     JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_PER_ELEMENT,
+                                     1) != 0))
                 goto exception;
             js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
             if (k >= len) {
@@ -42397,7 +42587,11 @@ static JSValue js_array_reduce(JSContext *ctx, JSValueConst this_val,
     }
     for (; k < len; k++) {
         k1 = (special & special_reduceRight) ? len - k - 1 : k;
-        if (unlikely(JS_UseGas(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT) != 0))
+        if (unlikely(JS_UseGasAt(ctx,
+                                 JS_GAS_ARRAY_CB_PER_ELEMENT,
+                                 JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT,
+                                 JS_GAS_CHARGE_KIND_ARRAY_CALLBACK_PER_ELEMENT,
+                                 1) != 0))
             goto exception;
         js_gas_trace_record_array_cb(ctx, JS_GAS_ARRAY_CB_PER_ELEMENT, TRUE);
         if (special & special_TA) {

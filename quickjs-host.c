@@ -9,6 +9,8 @@
 #define JS_HOST_ERROR_TAG_TRANSPORT "host/transport"
 #define JS_HOST_ERROR_CODE_ENVELOPE_INVALID "HOST_ENVELOPE_INVALID"
 #define JS_HOST_ERROR_TAG_ENVELOPE_INVALID "host/envelope_invalid"
+#define JS_GAS_SITE_HOST_CALL_PRE UINT32_C(2001)
+#define JS_GAS_SITE_HOST_CALL_POST UINT32_C(2002)
 
 static JSHostManifest *js_host_find_manifest(JSContext *ctx);
 static const char *js_host_namespace_name(const JSHostManifest *manifest);
@@ -2874,7 +2876,11 @@ static int js_host_charge_pre(JSContext *ctx, const JSHostFunctionDef *fn, size_
     }
 
     charge += arg_part;
-    if (JS_UseGas(ctx, charge) != 0)
+    if (JS_UseGasAt(ctx,
+                    charge,
+                    JS_GAS_SITE_HOST_CALL_PRE,
+                    JS_GAS_CHARGE_KIND_HOST_CALL_PRE,
+                    req_len) != 0)
         return -1;
     js_gas_trace_record_host_call_pre(ctx, charge);
     return 0;
@@ -2892,7 +2898,11 @@ static int js_host_charge_post(JSContext *ctx, const JSHostFunctionDef *fn, size
     }
 
     charge += resp_part + unit_part;
-    if (JS_UseGas(ctx, charge) != 0)
+    if (JS_UseGasAt(ctx,
+                    charge,
+                    JS_GAS_SITE_HOST_CALL_POST,
+                    JS_GAS_CHARGE_KIND_HOST_CALL_POST,
+                    resp_len) != 0)
         return -1;
     js_gas_trace_record_host_call_post(ctx, charge);
     return 0;
