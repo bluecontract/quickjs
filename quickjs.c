@@ -1141,6 +1141,7 @@ struct JSGasTraceData {
     uint64_t builtin_array_cb_per_element_count;
     uint64_t builtin_array_cb_per_element_gas;
     uint64_t allocation_count;
+    uint64_t allocation_requested_bytes;
     uint64_t allocation_bytes;
     uint64_t allocation_gas;
     uint64_t json_parse_count;
@@ -1222,14 +1223,18 @@ static void js_gas_trace_record_array_cb(JSContext *ctx, uint16_t gas_cost, BOOL
     }
 }
 
-static void js_gas_trace_record_allocation(JSContext *ctx, size_t size, uint64_t gas_cost)
+static void js_gas_trace_record_allocation(JSContext *ctx,
+                                           size_t requested_size,
+                                           size_t charged_size,
+                                           uint64_t gas_cost)
 {
     JSGasTraceData *trace = js_gas_trace_or_null(ctx);
     if (!trace)
         return;
 
     trace->allocation_count++;
-    trace->allocation_bytes += size;
+    trace->allocation_requested_bytes += requested_size;
+    trace->allocation_bytes += charged_size;
     trace->allocation_gas += gas_cost;
 }
 
@@ -1674,27 +1679,27 @@ static size_t js_det_normalize_allocation_size(JSRuntime *rt, size_t size)
 static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
 {
     JSRuntime *rt = ctx->rt;
-    size_t metered_size = js_det_normalize_allocation_size(rt, size);
+    size_t charged_size = js_det_normalize_allocation_size(rt, size);
     uint64_t gas_cost;
 
     if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
         return 0;
 
     if (rt->deterministic_mode) {
-        rt->det_gc_alloc_bytes += metered_size;
+        rt->det_gc_alloc_bytes += charged_size;
         if (rt->det_gc_alloc_bytes >= JS_DET_GC_THRESHOLD_BYTES)
             rt->det_gc_pending = TRUE;
     }
 
-    gas_cost = js_gas_allocation_cost(metered_size);
+    gas_cost = js_gas_allocation_cost(charged_size);
     if (JS_UseGasAt(ctx,
                     gas_cost,
                     JS_GAS_SITE_ALLOCATION,
                     JS_GAS_CHARGE_KIND_ALLOCATION,
-                    metered_size))
+                    charged_size))
         return -1;
 
-    js_gas_trace_record_allocation(ctx, metered_size, gas_cost);
+    js_gas_trace_record_allocation(ctx, size, charged_size, gas_cost);
     return 0;
 }
 
@@ -2864,6 +2869,7 @@ int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace)
     out_trace->builtin_array_cb_per_element_count = trace->builtin_array_cb_per_element_count;
     out_trace->builtin_array_cb_per_element_gas = trace->builtin_array_cb_per_element_gas;
     out_trace->allocation_count = trace->allocation_count;
+    out_trace->allocation_requested_bytes = trace->allocation_requested_bytes;
     out_trace->allocation_bytes = trace->allocation_bytes;
     out_trace->allocation_gas = trace->allocation_gas;
     out_trace->json_parse_count = trace->json_parse_count;

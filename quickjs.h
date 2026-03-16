@@ -425,6 +425,7 @@ typedef struct JSGasTrace {
     uint64_t builtin_array_cb_per_element_count;
     uint64_t builtin_array_cb_per_element_gas;
     uint64_t allocation_count;
+    uint64_t allocation_requested_bytes;
     uint64_t allocation_bytes;
     uint64_t allocation_gas;
     uint64_t json_parse_count;
