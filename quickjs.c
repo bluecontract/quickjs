@@ -1194,6 +1194,7 @@ typedef enum JSGasAllocationClass {
     JS_GAS_ALLOC_CLASS_CLOSURE_VAR_ENTRIES = 13,
     JS_GAS_ALLOC_CLASS_VAR_REF_POINTERS = 14,
     JS_GAS_ALLOC_CLASS_VAR_REF_RECORD = 15,
+    JS_GAS_ALLOC_CLASS_GENERIC_ARRAY = 16,
 } JSGasAllocationClass;
 
 #define JS_GAS_CANON_OBJECT_HEADER_BYTES UINT64_C(64)
@@ -1213,6 +1214,7 @@ typedef enum JSGasAllocationClass {
 #define JS_GAS_CANON_CLOSURE_VAR_ENTRY_BYTES UINT64_C(16)
 #define JS_GAS_CANON_VAR_REF_POINTER_BYTES UINT64_C(8)
 #define JS_GAS_CANON_VAR_REF_RECORD_BYTES UINT64_C(32)
+#define JS_GAS_CANON_GENERIC_ARRAY_UNIT_BYTES UINT64_C(16)
 
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
 {
@@ -1775,6 +1777,11 @@ static size_t js_det_canonical_allocation_size(size_t requested_size,
     case JS_GAS_ALLOC_CLASS_VAR_REF_RECORD:
         canonical = JS_GAS_CANON_VAR_REF_RECORD_BYTES;
         break;
+    case JS_GAS_ALLOC_CLASS_GENERIC_ARRAY:
+        canonical = js_gas_mul_add_u64(0,
+                                       logical_units,
+                                       JS_GAS_CANON_GENERIC_ARRAY_UNIT_BYTES);
+        break;
     case JS_GAS_ALLOC_CLASS_UNKNOWN:
     default:
         if (requested_size == 0)
@@ -2024,7 +2031,12 @@ static no_inline int js_realloc_array(JSContext *ctx, void **parray,
     void *new_array;
     /* XXX: potential arithmetic overflow */
     new_size = max_int(req_size, *psize * 3 / 2);
-    new_array = js_realloc2(ctx, *parray, new_size * elem_size, &slack);
+    new_array = js_realloc2_with_class(ctx,
+                                       *parray,
+                                       new_size * elem_size,
+                                       &slack,
+                                       JS_GAS_ALLOC_CLASS_GENERIC_ARRAY,
+                                       new_size);
     if (!new_array)
         return -1;
     new_size += slack / elem_size;
