@@ -1777,7 +1777,12 @@ static size_t js_det_canonical_allocation_size(size_t requested_size,
         break;
     case JS_GAS_ALLOC_CLASS_UNKNOWN:
     default:
-        canonical = requested_size;
+        if (requested_size == 0)
+            canonical = 0;
+        else if (requested_size <= JS_GAS_CANON_OBJECT_HEADER_BYTES)
+            canonical = JS_GAS_CANON_OBJECT_HEADER_BYTES;
+        else
+            canonical = requested_size;
         break;
     }
 
