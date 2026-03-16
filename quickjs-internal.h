@@ -31,6 +31,8 @@ void js_deterministic_set_manifest_state(JSContext *ctx,
 
 int js_deterministic_init_context(JSContext *ctx, uint32_t feature_flags);
 int js_deterministic_install_json(JSContext *ctx);
+void js_gas_trace_record_host_call_pre(JSContext *ctx, uint64_t gas_cost);
+void js_gas_trace_record_host_call_post(JSContext *ctx, uint64_t gas_cost);
 
 int js_reserve_host_response_buffer(JSContext *ctx, uint32_t capacity);
 uint8_t *js_get_host_response_buffer(JSContext *ctx);

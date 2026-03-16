@@ -440,6 +440,10 @@ typedef struct JSGasTrace {
     uint64_t json_stringify_object_entry_count;
     uint64_t json_stringify_array_element_count;
     uint64_t json_stringify_sort_comparison_count;
+    uint64_t host_call_pre_count;
+    uint64_t host_call_pre_gas;
+    uint64_t host_call_post_count;
+    uint64_t host_call_post_gas;
 } JSGasTrace;
 int JS_EnableGasTrace(JSContext *ctx, int enabled);
 int JS_ResetGasTrace(JSContext *ctx);

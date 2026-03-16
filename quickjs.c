@@ -1155,6 +1155,10 @@ struct JSGasTraceData {
     uint64_t json_stringify_object_entry_count;
     uint64_t json_stringify_array_element_count;
     uint64_t json_stringify_sort_comparison_count;
+    uint64_t host_call_pre_count;
+    uint64_t host_call_pre_gas;
+    uint64_t host_call_post_count;
+    uint64_t host_call_post_gas;
 };
 
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
@@ -1257,6 +1261,26 @@ static void js_gas_trace_record_json_stringify(JSContext *ctx,
     trace->json_stringify_object_entry_count += object_entry_count;
     trace->json_stringify_array_element_count += array_element_count;
     trace->json_stringify_sort_comparison_count += sort_comparison_count;
+}
+
+void js_gas_trace_record_host_call_pre(JSContext *ctx, uint64_t gas_cost)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    trace->host_call_pre_count++;
+    trace->host_call_pre_gas += gas_cost;
+}
+
+void js_gas_trace_record_host_call_post(JSContext *ctx, uint64_t gas_cost)
+{
+    JSGasTraceData *trace = js_gas_trace_or_null(ctx);
+    if (!trace)
+        return;
+
+    trace->host_call_post_count++;
+    trace->host_call_post_gas += gas_cost;
 }
 
 static int JS_InitAtoms(JSRuntime *rt);
@@ -2773,6 +2797,10 @@ int JS_ReadGasTrace(JSContext *ctx, JSGasTrace *out_trace)
     out_trace->json_stringify_object_entry_count = trace->json_stringify_object_entry_count;
     out_trace->json_stringify_array_element_count = trace->json_stringify_array_element_count;
     out_trace->json_stringify_sort_comparison_count = trace->json_stringify_sort_comparison_count;
+    out_trace->host_call_pre_count = trace->host_call_pre_count;
+    out_trace->host_call_pre_gas = trace->host_call_pre_gas;
+    out_trace->host_call_post_count = trace->host_call_post_count;
+    out_trace->host_call_post_gas = trace->host_call_post_gas;
 
     return 0;
 }

@@ -2874,7 +2874,10 @@ static int js_host_charge_pre(JSContext *ctx, const JSHostFunctionDef *fn, size_
     }
 
     charge += arg_part;
-    return JS_UseGas(ctx, charge);
+    if (JS_UseGas(ctx, charge) != 0)
+        return -1;
+    js_gas_trace_record_host_call_pre(ctx, charge);
+    return 0;
 }
 
 static int js_host_charge_post(JSContext *ctx, const JSHostFunctionDef *fn, size_t resp_len, uint32_t units)
@@ -2889,7 +2892,10 @@ static int js_host_charge_post(JSContext *ctx, const JSHostFunctionDef *fn, size
     }
 
     charge += resp_part + unit_part;
-    return JS_UseGas(ctx, charge);
+    if (JS_UseGas(ctx, charge) != 0)
+        return -1;
+    js_gas_trace_record_host_call_post(ctx, charge);
+    return 0;
 }
 
 static JSValue js_host_call_wrapper(JSContext *ctx,
