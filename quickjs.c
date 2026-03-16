@@ -1175,6 +1175,7 @@ typedef struct JSGasChargeTapeData {
 #define JS_GAS_SITE_ALLOCATION UINT32_C(2)
 #define JS_GAS_SITE_ARRAY_CALLBACK_BASE UINT32_C(3)
 #define JS_GAS_SITE_ARRAY_CALLBACK_PER_ELEMENT UINT32_C(4)
+#define JS_GAS_SITE_ALLOCATION_CLASS_BASE UINT32_C(1000)
 
 typedef enum JSGasAllocationClass {
     JS_GAS_ALLOC_CLASS_UNKNOWN = 0,
@@ -1784,7 +1785,7 @@ static int js_charge_gas_allocation_ctx_with_class(JSContext *ctx,
     gas_cost = js_gas_allocation_cost(charged_size);
     if (JS_UseGasAt(ctx,
                     gas_cost,
-                    JS_GAS_SITE_ALLOCATION,
+                    JS_GAS_SITE_ALLOCATION_CLASS_BASE + (uint32_t)alloc_class,
                     JS_GAS_CHARGE_KIND_ALLOCATION,
                     charged_size))
         return -1;
