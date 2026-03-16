@@ -1818,7 +1818,13 @@ static int js_charge_gas_allocation_ctx_with_class(JSContext *ctx,
     }
 
     if (rt->deterministic_mode &&
-        alloc_class == JS_GAS_ALLOC_CLASS_UNKNOWN) {
+        (alloc_class == JS_GAS_ALLOC_CLASS_UNKNOWN ||
+         alloc_class == JS_GAS_ALLOC_CLASS_OBJECT_HEADER ||
+         alloc_class == JS_GAS_ALLOC_CLASS_PROPERTY_SLOTS ||
+         alloc_class == JS_GAS_ALLOC_CLASS_SHAPE ||
+         alloc_class == JS_GAS_ALLOC_CLASS_ARRAY_BUFFER_HEADER ||
+         alloc_class == JS_GAS_ALLOC_CLASS_TYPED_ARRAY_BACKING ||
+         alloc_class == JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD)) {
         js_gas_trace_record_allocation(ctx, requested_size, charged_size, 0);
         return 0;
     }
