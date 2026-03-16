@@ -1594,25 +1594,46 @@ static uint64_t js_gas_allocation_cost(size_t size)
     return JS_GAS_ALLOC_BASE + units;
 }
 
+static size_t js_det_normalize_allocation_size(JSRuntime *rt, size_t size)
+{
+    if (!rt || !rt->deterministic_mode || size == 0)
+        return size;
+
+#if UINTPTR_MAX > 0xffffffff
+    {
+        size_t scaled_size;
+
+        if (size > (SIZE_MAX - 3) / 3)
+            return SIZE_MAX;
+
+        scaled_size = size * 3 + 3;
+        return scaled_size / 4;
+    }
+#else
+    return size;
+#endif
+}
+
 static int js_charge_gas_allocation_ctx(JSContext *ctx, size_t size)
 {
     JSRuntime *rt = ctx->rt;
+    size_t metered_size = js_det_normalize_allocation_size(rt, size);
     uint64_t gas_cost;
 
     if (rt->in_out_of_gas || rt->current_exception_is_uncatchable)
         return 0;
 
     if (rt->deterministic_mode) {
-        rt->det_gc_alloc_bytes += size;
+        rt->det_gc_alloc_bytes += metered_size;
         if (rt->det_gc_alloc_bytes >= JS_DET_GC_THRESHOLD_BYTES)
             rt->det_gc_pending = TRUE;
     }
 
-    gas_cost = js_gas_allocation_cost(size);
+    gas_cost = js_gas_allocation_cost(metered_size);
     if (JS_UseGas(ctx, gas_cost))
         return -1;
 
-    js_gas_trace_record_allocation(ctx, size, gas_cost);
+    js_gas_trace_record_allocation(ctx, metered_size, gas_cost);
     return 0;
 }
 
