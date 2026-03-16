@@ -1572,7 +1572,7 @@ static void js_trigger_gc(JSRuntime *rt, size_t size)
     }
 }
 
-#define JS_GAS_ALLOC_BASE 3
+#define JS_GAS_ALLOC_BASE 0
 #define JS_GAS_ALLOC_PER_BYTE_SHIFT 4
 #define JS_DET_GC_THRESHOLD_BYTES (512 * 1024)
 
@@ -1603,11 +1603,10 @@ static size_t js_det_normalize_allocation_size(JSRuntime *rt, size_t size)
     {
         size_t scaled_size;
 
-        if (size > (SIZE_MAX - 3) / 3)
+        if (size > (SIZE_MAX - 30) / 26)
             return SIZE_MAX;
-
-        scaled_size = size * 3 + 3;
-        return scaled_size / 4;
+        scaled_size = size * 26 + 30;
+        return scaled_size / 31;
     }
 #else
     return size;
