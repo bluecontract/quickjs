@@ -2568,6 +2568,7 @@ int JS_NewDeterministicRuntimeWithFeatures(JSRuntime **out_rt,
     rt->deterministic_mode = TRUE;
     rt->det_gc_pending = FALSE;
     rt->det_gc_alloc_bytes = 0;
+    rt->mf.js_malloc_usable_size = js_malloc_usable_size_unknown;
 #ifdef __EMSCRIPTEN__
     rt->host_call_func = js_wasm_host_call;
 #else
