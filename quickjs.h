@@ -355,7 +355,7 @@ typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSV
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
 typedef JSValue JSCFunctionData(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValue *func_data);
 
-#define JS_GAS_VERSION_LATEST 2
+#define JS_GAS_VERSION_LATEST 3
 #define JS_GAS_UNLIMITED UINT64_C(0xffffffffffffffff)
 
 typedef struct JSMallocState {
