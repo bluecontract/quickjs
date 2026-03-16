@@ -1190,6 +1190,10 @@ typedef enum JSGasAllocationClass {
     JS_GAS_ALLOC_CLASS_ARRAY_BUFFER_HEADER = 9,
     JS_GAS_ALLOC_CLASS_TYPED_ARRAY_BACKING = 10,
     JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD = 11,
+    JS_GAS_ALLOC_CLASS_COMPILER_FUNCTION_DEF = 12,
+    JS_GAS_ALLOC_CLASS_CLOSURE_VAR_ENTRIES = 13,
+    JS_GAS_ALLOC_CLASS_VAR_REF_POINTERS = 14,
+    JS_GAS_ALLOC_CLASS_VAR_REF_RECORD = 15,
 } JSGasAllocationClass;
 
 #define JS_GAS_CANON_OBJECT_HEADER_BYTES UINT64_C(64)
@@ -1205,6 +1209,10 @@ typedef enum JSGasAllocationClass {
 #define JS_GAS_CANON_ARRAY_BUFFER_HEADER_BYTES UINT64_C(48)
 #define JS_GAS_CANON_TYPED_ARRAY_BACKING_UNIT_BYTES UINT64_C(1)
 #define JS_GAS_CANON_TYPED_ARRAY_RECORD_BYTES UINT64_C(40)
+#define JS_GAS_CANON_COMPILER_FUNCTION_DEF_BYTES UINT64_C(512)
+#define JS_GAS_CANON_CLOSURE_VAR_ENTRY_BYTES UINT64_C(16)
+#define JS_GAS_CANON_VAR_REF_POINTER_BYTES UINT64_C(8)
+#define JS_GAS_CANON_VAR_REF_RECORD_BYTES UINT64_C(32)
 
 static void js_gas_trace_reset_counts(JSGasTraceData *trace)
 {
@@ -1750,6 +1758,22 @@ static size_t js_det_canonical_allocation_size(size_t requested_size,
         break;
     case JS_GAS_ALLOC_CLASS_TYPED_ARRAY_RECORD:
         canonical = JS_GAS_CANON_TYPED_ARRAY_RECORD_BYTES;
+        break;
+    case JS_GAS_ALLOC_CLASS_COMPILER_FUNCTION_DEF:
+        canonical = JS_GAS_CANON_COMPILER_FUNCTION_DEF_BYTES;
+        break;
+    case JS_GAS_ALLOC_CLASS_CLOSURE_VAR_ENTRIES:
+        canonical = js_gas_mul_add_u64(0,
+                                       logical_units,
+                                       JS_GAS_CANON_CLOSURE_VAR_ENTRY_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_VAR_REF_POINTERS:
+        canonical = js_gas_mul_add_u64(0,
+                                       logical_units,
+                                       JS_GAS_CANON_VAR_REF_POINTER_BYTES);
+        break;
+    case JS_GAS_ALLOC_CLASS_VAR_REF_RECORD:
+        canonical = JS_GAS_CANON_VAR_REF_RECORD_BYTES;
         break;
     case JS_GAS_ALLOC_CLASS_UNKNOWN:
     default:
@@ -17599,7 +17623,11 @@ static JSValueConst JS_GetActiveFunction(JSContext *ctx)
 static JSVarRef *js_create_var_ref(JSContext *ctx, BOOL is_lexical)
 {
     JSVarRef *var_ref;
-    var_ref = js_malloc(ctx, sizeof(JSVarRef));
+    var_ref = js_malloc_with_class(ctx,
+                                   sizeof(JSVarRef),
+                                   JS_GAS_ALLOC_CLASS_VAR_REF_RECORD,
+                                   1,
+                                   FALSE);
     if (!var_ref)
         return NULL;
     var_ref->header.ref_count = 1;
@@ -17647,7 +17675,11 @@ static JSVarRef *get_var_ref(JSContext *ctx, JSStackFrame *sf, int var_idx,
     }
 
     /* create a new one */
-    var_ref = js_malloc(ctx, sizeof(JSVarRef));
+    var_ref = js_malloc_with_class(ctx,
+                                   sizeof(JSVarRef),
+                                   JS_GAS_ALLOC_CLASS_VAR_REF_RECORD,
+                                   1,
+                                   FALSE);
     if (!var_ref)
         return NULL;
     var_ref->header.ref_count = 1;
@@ -17895,7 +17927,11 @@ static JSValue js_closure2(JSContext *ctx, JSValue func_obj,
     p->u.func.home_object = NULL;
     p->u.func.var_refs = NULL;
     if (b->closure_var_count) {
-        var_refs = js_mallocz(ctx, sizeof(var_refs[0]) * b->closure_var_count);
+        var_refs = js_malloc_with_class(ctx,
+                                        sizeof(var_refs[0]) * b->closure_var_count,
+                                        JS_GAS_ALLOC_CLASS_VAR_REF_POINTERS,
+                                        b->closure_var_count,
+                                        TRUE);
         if (!var_refs)
             goto fail;
         p->u.func.var_refs = var_refs;
@@ -32518,7 +32554,11 @@ static JSFunctionDef *js_new_function_def(JSContext *ctx,
 {
     JSFunctionDef *fd;
 
-    fd = js_mallocz(ctx, sizeof(*fd));
+    fd = js_malloc_with_class(ctx,
+                              sizeof(*fd),
+                              JS_GAS_ALLOC_CLASS_COMPILER_FUNCTION_DEF,
+                              1,
+                              TRUE);
     if (!fd)
         return NULL;
 
@@ -34234,7 +34274,12 @@ static __exception int add_closure_variables(JSContext *ctx, JSFunctionDef *s,
     s->closure_var_size = count;
     if (count == 0)
         return 0;
-    s->closure_var = js_malloc(ctx, sizeof(s->closure_var[0]) * count);
+    s->closure_var = js_malloc_with_class(
+        ctx,
+        sizeof(s->closure_var[0]) * count,
+        JS_GAS_ALLOC_CLASS_CLOSURE_VAR_ENTRIES,
+        count,
+        FALSE);
     if (!s->closure_var)
         return -1;
     /* Add lexical variables in scope at the point of evaluation */
