@@ -3257,7 +3257,10 @@ static int js_decode_context_blob(JSContext *ctx,
     if (!context_blob || context_blob_size == 0)
         return 0;
 
-    decoded = JS_DecodeDV(ctx, context_blob, context_blob_size, &JS_DV_LIMIT_DEFAULTS);
+    JSDvLimits context_limits = JS_DV_LIMIT_DEFAULTS;
+    context_limits.max_encoded_bytes = 16 * 1024 * 1024;
+
+    decoded = JS_DecodeDV(ctx, context_blob, context_blob_size, &context_limits);
     if (JS_IsException(decoded))
         return -1;
 
